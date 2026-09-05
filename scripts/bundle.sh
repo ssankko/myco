@@ -8,6 +8,15 @@ DIST="$ROOT/dist"
 DRIVER="$DIST/Mixanimo.driver"
 APP="$DIST/Mixanimo.app"
 
+#  The driver reports its version from the C source and the app reads the bundled plist, so the
+#  two must agree or an install would look up to date when it is not.
+SOURCE_VERSION="$(sed -n 's/.*#define kDriverVersion  *CFSTR("\(.*\)").*/\1/p' "$ROOT/Sources/MixanimoDriver/Mixanimo.c")"
+PLIST_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$ROOT/Sources/MixanimoDriver/Info.plist")"
+if [ "$SOURCE_VERSION" != "$PLIST_VERSION" ]; then
+	echo "driver version mismatch: Mixanimo.c says $SOURCE_VERSION, Info.plist says $PLIST_VERSION" >&2
+	exit 1
+fi
+
 swift build -c release --package-path "$ROOT"
 
 rm -rf "$DRIVER" "$APP"
@@ -42,6 +51,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 	<string>14.0</string>
 	<key>LSUIElement</key>
 	<true/>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Mixanimo reads your microphones so it can mix them into one input device.</string>
 </dict>
 </plist>
 PLIST

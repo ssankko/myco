@@ -17,7 +17,8 @@ let package = Package(
                 .linkedFramework("CoreFoundation"),
             ]
         ),
-        .executableTarget(name: "Mixanimo"),
+        .target(name: "MixanimoAtomics"),
+        .executableTarget(name: "Mixanimo", dependencies: ["MixanimoAtomics"]),
         .testTarget(name: "MixanimoTests", dependencies: ["Mixanimo"]),
     ]
 )

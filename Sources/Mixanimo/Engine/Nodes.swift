@@ -5,6 +5,9 @@ import Foundation
 /// The rate the mic mix runs at, fixed by the `Mixanimo Mic` device.
 let micMixRate: Double = 48000
 
+/// Weight of one block in the running average of a ring's fill, which spans about a second.
+let fillSmoothing = 0.002
+
 /// Throws away whatever a ring holds above `level` and answers what is left. Audio thread only:
 /// only the reader may drop frames.
 @inline(__always)
@@ -42,9 +45,6 @@ struct MonitorTap: @unchecked Sendable {
     private let summed: UnsafeMutablePointer<Float>
     private let part: UnsafeMutablePointer<Float>
     private let state: UnsafeMutablePointer<State>
-
-    /// Weight of one block in the running average of the ring fill, about a second of blocks.
-    static let fillSmoothing = 0.002
 
     /// `rate` and `frames` describe the consumer's IO cycle.
     init(inputs: Int, rate: Double, frames: Int) {
@@ -99,7 +99,7 @@ struct MonitorTap: @unchecked Sendable {
 
         // The fill jumps by a whole producer block every cycle; the ratio follows its average, so
         // the correction tracks the clock difference instead of the block pattern.
-        state.pointee.fill += MonitorTap.fillSmoothing * (Double(fill) - state.pointee.fill)
+        state.pointee.fill += fillSmoothing * (Double(fill) - state.pointee.fill)
         state.pointee.resampler.ratio = baseRatio * drift.ratioMultiplier(fillFrames: state.pointee.fill)
         let need = min(state.pointee.resampler.inputFramesNeeded(forOutput: count), capacity)
         var short = false
@@ -230,10 +230,10 @@ final class OutputNode {
         // The feed arrives one whole feed block at a time, so the ring waits for that much plus two
         // output blocks before it plays; anything less runs dry at the end of every feed cycle.
         let primeFrames = Double(feedBlockFrames) + 2 * Double(feedCapacity)
-        // Between two feed cycles the fill sweeps a whole feed block, so its average is half a block
-        // below the level that started it. Aiming there leaves the ratio at rest from the first block.
-        // A tenth of the default gain: the averaged fill still wanders tens of frames, and at this
-        // gain that is a pitch error under a tenth of a per cent instead of a slow audible wow.
+        // Between two feed cycles the fill sweeps a whole feed block, so its average sits half a
+        // block below the level that started it; aiming there leaves the ratio at rest. The gain is
+        // a tenth of the default because the averaged fill still wanders tens of frames, and this
+        // keeps that wander under a tenth of a per cent of pitch instead of an audible slow wow.
         let drift = DriftController(
             targetFillFrames: primeFrames - Double(feedBlockFrames) / 2, gain: 1e-5)
         ring = RingBuffer(
@@ -295,7 +295,7 @@ final class OutputNode {
 
             // The feed arrives a block at a time, so the ratio follows the average fill; the
             // instantaneous one would swing the pitch by the whole block every cycle.
-            state.pointee.fill += MonitorTap.fillSmoothing * (Double(fill) - state.pointee.fill)
+            state.pointee.fill += fillSmoothing * (Double(fill) - state.pointee.fill)
             state.pointee.resampler.ratio = baseRatio * drift.ratioMultiplier(fillFrames: state.pointee.fill)
             let need = min(state.pointee.resampler.inputFramesNeeded(forOutput: count), feedCapacity)
             if ring.read(into: feedScratch, frames: need) < need {

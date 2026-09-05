@@ -1,5 +1,8 @@
 //  Plays a tone into each virtual device and checks that the same tone comes back.
 //  The tests skip when the driver is not installed in /Library/Audio/Plug-Ins/HAL.
+//
+//  Reading any input device needs microphone permission, and the process that owns the terminal
+//  grants it. Run these from Terminal.app; a terminal without that permission captures silence.
 
 import CoreAudio
 import XCTest

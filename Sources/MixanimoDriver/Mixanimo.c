@@ -45,6 +45,8 @@ enum
 //  Sample frames between successive zero time stamps; the host rejects a period below 10923.
 #define kZeroTimeStampPeriod    16384u
 
+static const UInt32     kInputSafetyOffset = 512;
+
 static const Float32    kVolumeMinDB = -96.0f;
 static const Float32    kVolumeMaxDB = 0.0f;
 
@@ -410,8 +412,27 @@ static OSStatus Box_GetProperty(const AudioObjectPropertyAddress* inAddress,
 #pragma mark - Device object properties
 
 static OSStatus Device_GetProperty(const DeviceState* inDevice, const AudioObjectPropertyAddress* inAddress,
+                                   UInt32 inQualifierDataSize, const void* inQualifierData,
                                    UInt32 inDataSize, UInt32* outDataSize, void* outData)
 {
+    //  The owned objects query may name the classes it wants; an empty qualifier means all of them.
+    Boolean theWantsStreams = true;
+    Boolean theWantsControls = true;
+    if((inQualifierData != NULL) && (inQualifierDataSize >= sizeof(AudioClassID)))
+    {
+        const AudioClassID* theClasses = (const AudioClassID*)inQualifierData;
+        UInt32 theClassCount = inQualifierDataSize / sizeof(AudioClassID);
+        theWantsStreams = false;
+        theWantsControls = false;
+        for(UInt32 theIndex = 0; theIndex < theClassCount; ++theIndex)
+        {
+            if(theClasses[theIndex] == kAudioStreamClassID) theWantsStreams = true;
+            if((theClasses[theIndex] == kAudioControlClassID) || (theClasses[theIndex] == kAudioLevelControlClassID) ||
+               (theClasses[theIndex] == kAudioVolumeControlClassID) || (theClasses[theIndex] == kAudioBooleanControlClassID) ||
+               (theClasses[theIndex] == kAudioMuteControlClassID)) theWantsControls = true;
+        }
+    }
+
     Boolean theHasControls = (inDevice->mVolumeID != kAudioObjectUnknown);
     Boolean theControlScope = theHasControls && (inAddress->mScope == kAudioObjectPropertyScopeOutput) &&
                               (inAddress->mElement == kAudioObjectPropertyElementMain);
@@ -437,9 +458,12 @@ static OSStatus Device_GetProperty(const DeviceState* inDevice, const AudioObjec
         {
             AudioObjectID theList[4];
             UInt32 theCount = 0;
-            if(inAddress->mScope != kAudioObjectPropertyScopeOutput) theList[theCount++] = inDevice->mInputStreamID;
-            if(inAddress->mScope != kAudioObjectPropertyScopeInput) theList[theCount++] = inDevice->mOutputStreamID;
-            if(theHasControls && (inAddress->mScope != kAudioObjectPropertyScopeInput))
+            if(theWantsStreams)
+            {
+                if(inAddress->mScope != kAudioObjectPropertyScopeOutput) theList[theCount++] = inDevice->mInputStreamID;
+                if(inAddress->mScope != kAudioObjectPropertyScopeInput) theList[theCount++] = inDevice->mOutputStreamID;
+            }
+            if(theWantsControls && theHasControls && (inAddress->mScope != kAudioObjectPropertyScopeInput))
             {
                 theList[theCount++] = inDevice->mVolumeID;
                 theList[theCount++] = inDevice->mMuteID;
@@ -498,8 +522,12 @@ static OSStatus Device_GetProperty(const DeviceState* inDevice, const AudioObjec
             RETURN_SCALAR(UInt32, (gAppProcessCount > 0) ? 0 : 1);
 
         case kAudioDevicePropertyLatency:
-        case kAudioDevicePropertySafetyOffset:
             RETURN_SCALAR(UInt32, 0);
+
+        //  The margin on the input side: the host places the input time that much further behind
+        //  the output time, which keeps a loopback read behind the write that fills it.
+        case kAudioDevicePropertySafetyOffset:
+            RETURN_SCALAR(UInt32, (inAddress->mScope == kAudioObjectPropertyScopeInput) ? kInputSafetyOffset : 0);
 
         case kAudioDevicePropertyZeroTimeStampPeriod:
             RETURN_SCALAR(UInt32, kZeroTimeStampPeriod);
@@ -753,6 +781,7 @@ static OSStatus GetProperty(AudioObjectID inObjectID, const AudioObjectPropertyA
 
     if((inAddress == NULL) || (outDataSize == NULL)) return kAudioHardwareIllegalOperationError;
 
+
     pthread_mutex_lock(&gStateMutex);
     if(inObjectID == kAudioObjectPlugInObject)
     {
@@ -771,7 +800,7 @@ static OSStatus GetProperty(AudioObjectID inObjectID, const AudioObjectPropertyA
         }
         else if(inObjectID == theDevice->mDeviceID)
         {
-            theError = Device_GetProperty(theDevice, inAddress, inDataSize, outDataSize, outData);
+            theError = Device_GetProperty(theDevice, inAddress, inQualifierDataSize, inQualifierData, inDataSize, outDataSize, outData);
         }
         else if((inObjectID == theDevice->mInputStreamID) || (inObjectID == theDevice->mOutputStreamID))
         {
@@ -783,6 +812,7 @@ static OSStatus GetProperty(AudioObjectID inObjectID, const AudioObjectPropertyA
         }
     }
     pthread_mutex_unlock(&gStateMutex);
+
 
     return theError;
 }
@@ -942,8 +972,9 @@ static OSStatus Mixanimo_DestroyDevice(AudioServerPlugInDriverRef inDriver, Audi
     return kAudioHardwareUnsupportedOperationError;
 }
 
-//  The HAL calls this once per client process per device, when that process first asks the device
-//  for anything, not only when it creates an IOProc: a plain property read attaches the client too.
+//  The host attaches every process that holds a connection to CoreAudio, to both devices, as soon
+//  as the driver loads or that process appears. An IOProc is not needed and neither is a property
+//  read, so the app only has to be running for the devices to show.
 static OSStatus Mixanimo_AddDeviceClient(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID,
                                          const AudioServerPlugInClientInfo* inClientInfo)
 {
@@ -954,15 +985,14 @@ static OSStatus Mixanimo_AddDeviceClient(AudioServerPlugInDriverRef inDriver, Au
     pthread_mutex_lock(&gStateMutex);
     Boolean theHiddenChanged = TrackAppClient(inClientInfo, true);
     AudioServerPlugInHostRef theHost = gHost;
-    UInt32 theProcesses = gAppProcessCount;
     pthread_mutex_unlock(&gStateMutex);
 
-    os_log(OS_LOG_DEFAULT, "Mixanimo: AddDeviceClient device %u pid %d bundle %{public}@ apps %u",
-           (unsigned)inDeviceObjectID, (inClientInfo != NULL) ? inClientInfo->mProcessID : 0,
-           ((inClientInfo != NULL) && (inClientInfo->mBundleID != NULL)) ? inClientInfo->mBundleID : CFSTR("(none)"),
-           (unsigned)theProcesses);
-
-    if(theHiddenChanged) NotifyHiddenChanged(theHost);
+    if(theHiddenChanged)
+    {
+        os_log(OS_LOG_DEFAULT, "Mixanimo: app attached, pid %d, showing both devices",
+               (inClientInfo != NULL) ? inClientInfo->mProcessID : 0);
+        NotifyHiddenChanged(theHost);
+    }
     return 0;
 }
 
@@ -976,14 +1006,14 @@ static OSStatus Mixanimo_RemoveDeviceClient(AudioServerPlugInDriverRef inDriver,
     pthread_mutex_lock(&gStateMutex);
     Boolean theHiddenChanged = TrackAppClient(inClientInfo, false);
     AudioServerPlugInHostRef theHost = gHost;
-    UInt32 theProcesses = gAppProcessCount;
     pthread_mutex_unlock(&gStateMutex);
 
-    os_log(OS_LOG_DEFAULT, "Mixanimo: RemoveDeviceClient device %u pid %d apps %u",
-           (unsigned)inDeviceObjectID, (inClientInfo != NULL) ? inClientInfo->mProcessID : 0,
-           (unsigned)theProcesses);
-
-    if(theHiddenChanged) NotifyHiddenChanged(theHost);
+    if(theHiddenChanged)
+    {
+        os_log(OS_LOG_DEFAULT, "Mixanimo: app gone, pid %d, hiding both devices",
+               (inClientInfo != NULL) ? inClientInfo->mProcessID : 0);
+        NotifyHiddenChanged(theHost);
+    }
     return 0;
 }
 
@@ -1364,7 +1394,7 @@ static OSStatus Mixanimo_DoIOOperation(AudioServerPlugInDriverRef inDriver, Audi
                                        UInt32 inIOBufferFrameSize, const AudioServerPlugInIOCycleInfo* inIOCycleInfo,
                                        void* ioMainBuffer, void* ioSecondaryBuffer)
 {
-    (void)inDriver; (void)inStreamObjectID; (void)inClientID; (void)ioSecondaryBuffer;
+    (void)inDriver; (void)inStreamObjectID; (void)ioSecondaryBuffer;
 
     DeviceState* theDevice = DeviceForObjectID(inDeviceObjectID);
     if((theDevice == NULL) || (inDeviceObjectID != theDevice->mDeviceID)) return kAudioHardwareBadObjectError;

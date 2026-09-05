@@ -70,14 +70,16 @@ public struct SmoothedGain: Sendable {
         // The ramp runs per sample rather than per frame, so the two channels of one frame differ by
         // half a step; the step itself is sized so the whole change lands in `rampFrames` frames.
         var step = stepPerFrame / Float(channels)
-        let rampSamples = min(samples, max(0, Int(((target - current) / step).rounded(.up))))
+        let samplesToTarget = max(0, Int(((target - current) / step).rounded(.up)))
+        let rampSamples = min(samples, samplesToTarget)
         var start = current
         vDSP_vrampmul(buffer, 1, &start, &step, buffer, 1, vDSP_Length(rampSamples))
 
-        current += step * Float(rampSamples)
-        if (stepPerFrame > 0 && current >= target) || (stepPerFrame < 0 && current <= target) {
+        if rampSamples == samplesToTarget {
             current = target
             stepPerFrame = 0
+        } else {
+            current += step * Float(rampSamples)
         }
         if rampSamples < samples {
             var gain = current

@@ -26,6 +26,7 @@ public struct DelayLine: @unchecked Sendable {
     private static let fadeTarget = 2
     private static let fadeProgress = 3
     private static let pendingDelay = 4
+    private static let primed = 5
 
     /// `maxDelayFrames` defaults to two seconds at 192 kHz, the longest rate the app publishes.
     public init(maxDelayFrames: Int = 384_000, channels: Int = 2, crossfadeFrames: Int = 256) {
@@ -41,8 +42,8 @@ public struct DelayLine: @unchecked Sendable {
         samples.initialize(repeating: 0, count: capacityFrames * channels)
         requested = .allocate(capacity: 1)
         requested.initialize(to: 0)
-        state = .allocate(capacity: 5)
-        state.initialize(repeating: 0, count: 5)
+        state = .allocate(capacity: 6)
+        state.initialize(repeating: 0, count: 6)
         state[Self.pendingDelay] = -1
     }
 
@@ -72,6 +73,7 @@ public struct DelayLine: @unchecked Sendable {
         state[Self.fadeTarget] = state[Self.currentDelay]
         state[Self.fadeProgress] = 0
         state[Self.pendingDelay] = -1
+        state[Self.primed] = 1
     }
 
     /// Delays an interleaved buffer in place. Audio thread only.
@@ -131,7 +133,12 @@ public struct DelayLine: @unchecked Sendable {
 
     private func takeRequestedDelay() {
         let wanted = requestedDelayFrames
-        if state[Self.currentDelay] == state[Self.fadeTarget] {
+        // The first block starts at whatever delay is already configured; only a later change fades.
+        if state[Self.primed] == 0 {
+            state[Self.primed] = 1
+            state[Self.currentDelay] = wanted
+            state[Self.fadeTarget] = wanted
+        } else if state[Self.currentDelay] == state[Self.fadeTarget] {
             state[Self.fadeTarget] = wanted
         } else if wanted != state[Self.fadeTarget] {
             state[Self.pendingDelay] = wanted

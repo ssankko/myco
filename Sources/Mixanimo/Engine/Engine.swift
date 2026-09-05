@@ -111,6 +111,18 @@ final class Engine {
         if managesDefaults { defaultDevices.restore() }
     }
 
+    /// Installs the bundled driver and reports what the machine has afterwards. The device list
+    /// settles inside the installer, so the answer is the new state.
+    func installDriver() async throws {
+        defer { model.driver = DriverInstaller.status() }
+        try await DriverInstaller.install()
+    }
+
+    func uninstallDriver() async throws {
+        defer { model.driver = DriverInstaller.status() }
+        try await DriverInstaller.uninstall()
+    }
+
     private func observeSettings() {
         withObservationTracking {
             _ = model.settings
@@ -177,25 +189,43 @@ final class Engine {
             virtualRate: model.settings.virtualRate,
             feedFrames: Int((try? virtual.bufferFrameSize) ?? 512))
 
-        for device in model.devices.outputs {
-            guard let uid = try? device.uid, uid != AppModel.outputDeviceUID, device.isAlive else { continue }
+        let outputUIDs = Set(model.settings.outputs.filter(\.value.enabled).keys)
+        for uid in Engine.ordered(outputUIDs, listed: model.devices.outputs) {
+            guard uid != AppModel.outputDeviceUID, let device = Engine.present(uid) else { continue }
             let settings = model.output(uid)
-            guard settings.enabled else { continue }
             wanted.outputs.append(
                 Plan.Output(
                     uid: uid, deviceID: device.id,
                     sampleRate: (try? device.nominalSampleRate) ?? 0,
                     bufferFrames: settings.bufferFrames, monitor: settings.monitor))
         }
-        for device in model.devices.inputs {
-            guard let uid = try? device.uid, uid != AppModel.micDeviceUID,
-                uid != AppModel.outputDeviceUID, device.isAlive, model.input(uid).enabled
+        let inputUIDs = Set(model.settings.inputs.filter(\.value.enabled).keys)
+        for uid in Engine.ordered(inputUIDs, listed: model.devices.inputs) {
+            guard uid != AppModel.micDeviceUID, uid != AppModel.outputDeviceUID,
+                let device = Engine.present(uid)
             else { continue }
             wanted.inputs.append(
                 Plan.Input(
                     uid: uid, deviceID: device.id, sampleRate: (try? device.nominalSampleRate) ?? 0))
         }
         return wanted
+    }
+
+    /// `wanted` in the order the device list shows them, followed by the ones the list leaves out
+    /// because the HAL hides them from this process; a hidden device still works by UID.
+    private static func ordered(_ wanted: Set<String>, listed: [AudioDevice]) -> [String] {
+        var uids = listed.compactMap { device -> String? in
+            guard let uid = try? device.uid, wanted.contains(uid) else { return nil }
+            return uid
+        }
+        uids.append(contentsOf: wanted.subtracting(uids).sorted())
+        return uids
+    }
+
+    /// The device behind a UID, when the HAL still has it and it is alive.
+    private static func present(_ uid: String) -> AudioDevice? {
+        guard let device = (try? AudioDevice.find(uid: uid)) ?? nil, device.isAlive else { return nil }
+        return device
     }
 
     private func build() {

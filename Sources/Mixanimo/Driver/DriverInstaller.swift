@@ -17,11 +17,17 @@ enum DriverInstaller {
     private static let versionSelector = AudioObjectPropertySelector(0x6D78_7672)
 
     static func installedVersion() -> String? {
-        guard
-            let plugIn: AudioObjectID = try? AudioObjectID.system.value(
+        //  The type of the object ID is spelled out because the property read is generic and an
+        //  optional result would ask the HAL for the wrong size.
+        let plugIn: AudioObjectID
+        do {
+            plugIn = try AudioObjectID.system.value(
                 AudioObjectPropertyAddress(kAudioHardwarePropertyTranslateBundleIDToPlugIn),
-                qualifier: bundleID as CFString),
-            plugIn != AudioObjectID(kAudioObjectUnknown),
+                qualifier: bundleID as CFString)
+        } catch {
+            return nil
+        }
+        guard plugIn != AudioObjectID(kAudioObjectUnknown),
             let version = try? plugIn.string(AudioObjectPropertyAddress(versionSelector)),
             !version.isEmpty
         else { return nil }

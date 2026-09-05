@@ -1394,7 +1394,7 @@ static OSStatus Mixanimo_DoIOOperation(AudioServerPlugInDriverRef inDriver, Audi
                                        UInt32 inIOBufferFrameSize, const AudioServerPlugInIOCycleInfo* inIOCycleInfo,
                                        void* ioMainBuffer, void* ioSecondaryBuffer)
 {
-    (void)inDriver; (void)inStreamObjectID; (void)ioSecondaryBuffer;
+    (void)inDriver; (void)inStreamObjectID; (void)inClientID; (void)ioSecondaryBuffer;
 
     DeviceState* theDevice = DeviceForObjectID(inDeviceObjectID);
     if((theDevice == NULL) || (inDeviceObjectID != theDevice->mDeviceID)) return kAudioHardwareBadObjectError;

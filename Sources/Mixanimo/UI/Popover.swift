@@ -89,8 +89,7 @@ struct Popover: View {
     private var devices: some View {
         VStack(alignment: .leading, spacing: 3) {
             SectionHeader(
-                title: "Listen",
-                caption: "Every device here plays the game",
+                title: "Outputs",
                 detail: onCount(outputs.count, model.settings.outputs.values.filter(\.enabled).count))
                 .padding(.bottom, 2)
             if outputs.isEmpty {
@@ -102,8 +101,7 @@ struct Popover: View {
 
         VStack(alignment: .leading, spacing: 3) {
             SectionHeader(
-                title: "Talk",
-                caption: "These microphones become Mixanimo Mic in Steam",
+                title: "Inputs",
                 detail: onCount(inputs.count, model.settings.inputs.values.filter(\.enabled).count))
                 .padding(.bottom, 2)
             if inputs.isEmpty {

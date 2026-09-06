@@ -55,20 +55,14 @@ extension View {
 /// A section title, what the section does to the audio, and how much of it is on.
 struct SectionHeader: View {
     let title: String
-    let caption: String
     let detail: String
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 1) {
-            HStack(alignment: .firstTextBaseline) {
-                Text(title).font(.system(size: 12, weight: .semibold))
-                Spacer(minLength: 8)
-                Text(detail)
-                    .font(.system(size: 10.5).monospacedDigit())
-                    .foregroundStyle(.tertiary)
-            }
-            Text(caption)
-                .font(.system(size: 10.5))
+        HStack(alignment: .firstTextBaseline) {
+            Text(title).font(.system(size: 12, weight: .semibold))
+            Spacer(minLength: 8)
+            Text(detail)
+                .font(.system(size: 10.5).monospacedDigit())
                 .foregroundStyle(.tertiary)
         }
         .accessibilityElement(children: .combine)

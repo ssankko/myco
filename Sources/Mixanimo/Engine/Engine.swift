@@ -231,8 +231,9 @@ final class Engine {
             feed = try SharedFeed.open()
         } catch {
             log.error("shared feed: \(String(describing: error), privacy: .public)")
-            model.driver = .outdated(
-                installed: DriverInstaller.installedVersion() ?? "", bundled: DriverInstaller.bundledVersion)
+            model.driver = DriverInstaller.installedVersion().map {
+                .outdated(installed: $0, bundled: DriverInstaller.bundledVersion)
+            } ?? .notInstalled
         }
         return feed
     }

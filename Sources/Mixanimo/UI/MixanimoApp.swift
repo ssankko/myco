@@ -53,6 +53,8 @@ final class StatusItem: NSObject {
 
     private let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
     private let popover = NSPopover()
+    /// Watches for clicks in other apps while the popover is open.
+    private var outsideClicks: Any?
 
     private init(content: some View) {
         super.init()
@@ -60,6 +62,10 @@ final class StatusItem: NSObject {
         host.sizingOptions = [.preferredContentSize]
         popover.contentViewController = host
         popover.behavior = .transient
+        // Every content size change is animated, and the animation re-anchors the window while it
+        // resizes, so a row that opens makes the whole popover slide.
+        popover.animates = false
+        popover.delegate = self
         item.button?.image = MixanimoMark.statusImage
         item.button?.setAccessibilityLabel("Mixanimo")
         item.button?.target = self
@@ -76,5 +82,19 @@ final class StatusItem: NSObject {
         // an active app to take the key window and with it the keyboard shortcuts.
         NSApplication.shared.activate()
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        // A transient popover closes on a click in its own app, so only a global monitor, which
+        // sees the clicks that land in other apps, covers the rest of the screen.
+        outsideClicks = NSEvent.addGlobalMonitorForEvents(
+            matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.popover.performClose(nil) }
+        }
+    }
+}
+
+extension StatusItem: NSPopoverDelegate {
+    func popoverDidClose(_ notification: Notification) {
+        if let outsideClicks { NSEvent.removeMonitor(outsideClicks) }
+        outsideClicks = nil
     }
 }

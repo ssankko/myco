@@ -238,11 +238,14 @@ final class OutputNode {
             let count = min(bufferListFrames(output), bufferFrames)
             guard count > 0 else { return }
 
+            // The write position is read first: the block that published it is already there,
+            // while the other order can pair a fresh position with the block before it.
+            let write = feed.writeFrame
             let writeBlock = feed.writeBlockFrames
             let target = FeedReader.targetFill(writeBlock: writeBlock, pull: pull)
             guard
                 let step = state.pointee.reader.step(
-                    write: feed.writeFrame, generation: feed.generation, target: target)
+                    write: write, generation: feed.generation, target: target)
             else {
                 // Nothing plays into the virtual device, or the reader caught up with it.
                 silence(output)

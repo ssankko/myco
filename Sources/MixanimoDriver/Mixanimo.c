@@ -1009,7 +1009,7 @@ static void FeedCreate(DeviceState* inDevice)
     }
     if(theFile < 0)
     {
-        os_log_error(OS_LOG_DEFAULT, "Mixanimo: cannot open %s, errno %d", kFeedName, errno);
+        os_log_error(OS_LOG_DEFAULT, "Mixanimo: cannot open %{public}s, errno %d", kFeedName, errno);
         return;
     }
     fchmod(theFile, 0644);
@@ -1018,13 +1018,13 @@ static void FeedCreate(DeviceState* inDevice)
     close(theFile);
     if(theMap == MAP_FAILED)
     {
-        os_log_error(OS_LOG_DEFAULT, "Mixanimo: cannot map %s, errno %d", kFeedName, errno);
+        os_log_error(OS_LOG_DEFAULT, "Mixanimo: cannot map %{public}s, errno %d", kFeedName, errno);
         return;
     }
     //  The IO thread must never take a fault on the ring.
     if(mlock(theMap, theBytes) != 0)
     {
-        os_log_error(OS_LOG_DEFAULT, "Mixanimo: cannot lock %s, errno %d", kFeedName, errno);
+        os_log_error(OS_LOG_DEFAULT, "Mixanimo: cannot lock %{public}s, errno %d", kFeedName, errno);
     }
 
     FeedHeader* theFeed = (FeedHeader*)theMap;
@@ -1040,7 +1040,7 @@ static void FeedCreate(DeviceState* inDevice)
     atomic_store_explicit(&theFeed->mWriteBlockFrames, 0, memory_order_relaxed);
     atomic_store_explicit(&theFeed->mMagic, kFeedMagic, memory_order_release);
 
-    os_log(OS_LOG_DEFAULT, "Mixanimo: feed %s ready, %zu bytes, generation %llu",
+    os_log(OS_LOG_DEFAULT, "Mixanimo: feed %{public}s ready, %zu bytes, generation %llu",
            kFeedName, theBytes, theFeed->mGeneration);
 }
 

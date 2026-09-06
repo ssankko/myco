@@ -138,15 +138,20 @@ final class SharedFeedTests: XCTestCase {
         XCTAssertEqual(reader.readFrame, UInt64.max - 219)
     }
 
-    /// The driver zeroes its write position when the device starts again, which reads as a fill
-    /// far below zero rather than as a huge one.
+    /// The driver zeroes its write position when the device starts again. The reader drops what it
+    /// had and waits for the next frames rather than taking a position in front of them.
     func testAWritePositionThatRestartsSendsTheReaderBackToIdle() {
         var reader = FeedReader()
         _ = reader.step(write: 90000, generation: 1, target: 300)
         _ = reader.step(write: 90512, generation: 1, target: 300)
         XCTAssertFalse(reader.idle)
 
-        XCTAssertNil(reader.step(write: 512, generation: 1, target: 300))
+        XCTAssertNil(reader.step(write: 0, generation: 1, target: 300))
         XCTAssertTrue(reader.idle)
+        XCTAssertNil(reader.step(write: 0, generation: 1, target: 300), "still nothing written")
+
+        let back = reader.step(write: 512, generation: 1, target: 300)
+        XCTAssertEqual(back?.resynced, true)
+        XCTAssertEqual(reader.readFrame, 212)
     }
 }

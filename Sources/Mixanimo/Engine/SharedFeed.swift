@@ -181,7 +181,9 @@ struct FeedReader {
             return nil
         }
         guard !idle else {
-            guard write != lastWrite else { return nil }
+            // Forwards only: the driver zeroes its position when the device starts again, and a
+            // reader that took the jump would sit in front of everything written since.
+            guard Int64(bitPattern: write &- lastWrite) > 0 else { return nil }
             readFrame = write &- UInt64(target)
             idle = false
             return Step(fill: target, resynced: true)

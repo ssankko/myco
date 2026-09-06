@@ -123,9 +123,11 @@ final class EngineTests: XCTestCase {
         try capture.start()
         try source.start()
         Thread.sleep(forTimeInterval: 1.0)
+        //  Counted while the source still plays: the last partial pull a source that stops leaves
+        //  behind is one more underrun, and it says nothing about the second the output ran.
+        engine.pollCounters()
         source.stop()
         let recorded = capture.stop()
-        engine.pollCounters()
 
         XCTAssertEqual(model.outputStatus[AppModel.micDeviceUID]?.underruns, 0)
         //  The first half second covers the ring priming and the gain ramps.

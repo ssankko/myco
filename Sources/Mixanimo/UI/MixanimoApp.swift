@@ -58,6 +58,7 @@ final class StatusItem: NSObject {
     private let popover = NSPopover()
     /// Watches for clicks in other apps while the popover is open.
     private var outsideClicks: Any?
+    private var becameActive: (any NSObjectProtocol)?
 
     private init(content: some View, model: AppModel) {
         self.model = model
@@ -82,10 +83,21 @@ final class StatusItem: NSObject {
             popover.performClose(nil)
             return
         }
-        // An accessory app is not frontmost after a status item click, and the popover needs
-        // an active app to take the key window and with it the keyboard shortcuts.
-        NSApplication.shared.activate()
+        // An accessory app is not frontmost after a status item click, and cooperative activation
+        // lands a moment later. The frontmost app is asked to yield, and the popover window is
+        // made key as soon as the app is active, so its controls draw active and take Cmd-Q.
+        if let front = NSWorkspace.shared.frontmostApplication, front != NSRunningApplication.current {
+            _ = NSRunningApplication.current.activate(from: front, options: [])
+        } else {
+            NSApplication.shared.activate()
+        }
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        popover.contentViewController?.view.window?.makeKey()
+        becameActive = NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.popover.contentViewController?.view.window?.makeKey() }
+        }
         model.isMetering = true
         // A transient popover closes on a click in its own app, so only a global monitor, which
         // sees the clicks that land in other apps, covers the rest of the screen.
@@ -102,5 +114,7 @@ extension StatusItem: NSPopoverDelegate {
         model.isMetering = false
         if let outsideClicks { NSEvent.removeMonitor(outsideClicks) }
         outsideClicks = nil
+        if let becameActive { NotificationCenter.default.removeObserver(becameActive) }
+        becameActive = nil
     }
 }

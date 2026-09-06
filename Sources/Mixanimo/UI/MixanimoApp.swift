@@ -29,8 +29,7 @@ struct MixanimoApp: App {
         MenuBarExtra {
             Popover(model: model, actions: actions)
         } label: {
-            MixanimoMark(isLive: model.driver.isReady)
-                .frame(width: 15, height: 13)
+            Image(nsImage: MixanimoMark.statusImage)
                 .accessibilityLabel("Mixanimo")
         }
         .menuBarExtraStyle(.window)

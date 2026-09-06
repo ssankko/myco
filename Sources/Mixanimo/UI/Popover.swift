@@ -23,12 +23,13 @@ struct Popover: View {
                 DriverRow(status: model.driver, actions: actions)
             }
             Divider().opacity(0.6)
-            // The list scrolls only once it outgrows the popover.
-            ViewThatFits(in: .vertical) {
+            // The menu bar window proposes no height, so a scroll view here collapses to nothing
+            // unless it is given one. Short lists skip it and let the window grow.
+            if outputs.count + inputs.count <= 8 {
                 deviceStack
-                ScrollView { deviceStack }.scrollBounceBehavior(.basedOnSize)
+            } else {
+                ScrollView { deviceStack }.frame(height: 420)
             }
-            .frame(maxHeight: 420)
             Divider().opacity(0.6)
             footer
         }

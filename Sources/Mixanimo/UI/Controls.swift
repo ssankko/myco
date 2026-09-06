@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// A device paired with the UID its settings are stored under.
@@ -190,4 +191,22 @@ struct MixanimoMark: View {
         }
         .opacity(isLive ? 1 : 0.4)
     }
+
+    /// The same three bars as a template image. A status item draws only text or an image, so
+    /// the menu bar label cannot be the Canvas above.
+    static let statusImage: NSImage = {
+        let image = NSImage(size: NSSize(width: 15, height: 13), flipped: false) { rect in
+            let heights: [CGFloat] = [0.45, 1.0, 0.7]
+            let barWidth = rect.width / 5
+            for (index, fraction) in heights.enumerated() {
+                let bar = NSRect(
+                    x: CGFloat(index) * barWidth * 2, y: 0,
+                    width: barWidth, height: rect.height * fraction)
+                NSBezierPath(roundedRect: bar, xRadius: barWidth / 2, yRadius: barWidth / 2).fill()
+            }
+            return true
+        }
+        image.isTemplate = true
+        return image
+    }()
 }

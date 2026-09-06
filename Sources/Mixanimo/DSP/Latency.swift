@@ -6,6 +6,9 @@ public struct OutputLatency: Sendable, Equatable {
     public var safetyOffset: Int
     public var streamLatency: Int
     public var bufferSize: Int
+    /// What the feed ring holds while it plays. The audio in the ring is already this old when the
+    /// chain picks it up, so it counts as much as the device's own latency.
+    public var ringFill: Int
     public var sampleRate: Double
 
     public init(
@@ -13,16 +16,20 @@ public struct OutputLatency: Sendable, Equatable {
         safetyOffset: Int = 0,
         streamLatency: Int = 0,
         bufferSize: Int = 0,
+        ringFill: Int = 0,
         sampleRate: Double
     ) {
         self.deviceLatency = deviceLatency
         self.safetyOffset = safetyOffset
         self.streamLatency = streamLatency
         self.bufferSize = bufferSize
+        self.ringFill = ringFill
         self.sampleRate = sampleRate
     }
 
-    public var totalFrames: Int { deviceLatency + safetyOffset + streamLatency + bufferSize }
+    public var totalFrames: Int {
+        deviceLatency + safetyOffset + streamLatency + bufferSize + ringFill
+    }
 
     public var seconds: Double { sampleRate > 0 ? Double(totalFrames) / sampleRate : 0 }
 }

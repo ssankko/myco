@@ -95,6 +95,48 @@ final class EngineTests: XCTestCase {
             -20, "the captured tone carries more than the source did")
     }
 
+    /// A 32-frame output is not held to the process default feed block: the feed shrinks to the one
+    /// output pull, the ring stays fed at that size, and the tone still comes out.
+    func testSmallOutputBufferShrinksTheFeed() throws {
+        let virtual = try device(AppModel.outputDeviceUID)
+        let mic = try device(AppModel.micDeviceUID)
+        try virtual.setVolumeScalar(1, scope: .output)
+        try virtual.setMute(false, scope: .output)
+
+        var settings = settings(virtualRate: 88200)
+        settings.outputs[AppModel.micDeviceUID] = OutputSettings(enabled: true, bufferFrames: 32)
+        let model = AppModel(settings: settings)
+        let engine = Engine(model: model, managesDefaults: false, defaultsStore: emptyStore())
+        engine.start()
+        defer { engine.stop() }
+
+        XCTAssertEqual(Int(try mic.bufferFrameSize), 32, "the output runs at the size it was given")
+        XCTAssertEqual(engine.feedBlockFrames, 59, "32 output frames at 48000 are 59 at 88200")
+
+        let capture = try Capture(device: mic, seconds: 1.5)
+        let source = try SineSource(device: virtual, frequency: 1000, amplitude: 0.5)
+        try capture.start()
+        try source.start()
+        Thread.sleep(forTimeInterval: 1.0)
+        source.stop()
+        let recorded = capture.stop()
+        engine.pollCounters()
+
+        XCTAssertEqual(model.outputStatus[AppModel.micDeviceUID]?.underruns, 0)
+        //  The first half second covers the ring priming and the gain ramps.
+        let range = 24000..<min(recorded.count, 48000)
+        XCTAssertGreaterThan(range.count, 12000, "captured frames")
+        let tone = dominantTone(recorded, around: 1000, sampleRate: 48000, range: range)
+        XCTAssertEqual(tone.frequency, 1000, accuracy: 2, "the resampled tone drifted off 1 kHz")
+        XCTAssertEqual(decibels(tone.amplitude / 0.5), 0, accuracy: 1, "the tone's own level")
+
+        //  The ring the feed fills is most of what this output waits for, so the reported latency
+        //  has to carry it; 32 frames of buffer alone would be a fifth of a millisecond.
+        let status = try XCTUnwrap(model.outputStatus[AppModel.micDeviceUID])
+        XCTAssertGreaterThan(status.latencyMilliseconds, 3, "the ring prime is missing from it")
+        XCTAssertLessThan(status.latencyMilliseconds, 12)
+    }
+
     /// Sync publishes the alignment delay and the measured latency per output; the only output has
     /// nothing to wait for, so its delay is its own trim.
     func testSyncPublishesDelayAndLatency() throws {

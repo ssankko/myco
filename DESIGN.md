@@ -33,7 +33,9 @@ Runs in the app process.
 
 Output path:
 
-1. One IO callback on the `Mixanimo` device reads the mixed feed.
+1. One IO callback on the `Mixanimo` device reads the mixed feed. Its buffer size is the smallest
+   enabled output's buffer size converted to the virtual rate, so a 32-frame wired output is not
+   held to the process default of about 512 frames.
 2. Each enabled physical output has its own IO callback at its own buffer size (`kAudioDevicePropertyBufferFrameSize`, clamped to the device's reported range). Defaults: 256 frames for Bluetooth transport, 128 otherwise.
 3. Per output, in order: ring buffer from the feed, resampler from the virtual rate to the device's current nominal rate (the device's rate is never changed by Mixanimo), drift correction by nudging the resample ratio from the ring fill level, optional mic monitor summed in, ten-band EQ (biquads via Accelerate `vDSP_biquad`, RBJ coefficients, filter types matching Apple's EQ unit), delay line, per-output gain, master gain.
 4. Master gain mirrors the driver's volume control both ways.
@@ -49,7 +51,7 @@ Hot swap: the engine listens for `kAudioHardwarePropertyDevices`. A device whose
 
 Pinning: while running and with the toggle on, the engine listens for default output and default input changes and sets them back to the virtual devices.
 
-Sync: a global toggle. Off means every output delay is 0. On means each output delay is the largest reported output latency (`kAudioDevicePropertyLatency` + `kAudioDevicePropertySafetyOffset` + stream latency + buffer size) among enabled outputs minus its own, plus a per-output manual trim in milliseconds.
+Sync: a global toggle. Off means every output delay is 0. On means each output delay is the largest reported output latency (`kAudioDevicePropertyLatency` + `kAudioDevicePropertySafetyOffset` + stream latency + buffer size + what its feed ring holds) among enabled outputs minus its own, plus a per-output manual trim in milliseconds.
 
 Lifecycle: on launch, remember the current default output and input, then pin to the virtual devices. On quit, restore them. On launch after a crash, the same logic applies because the driver already hid the devices when the app died.
 

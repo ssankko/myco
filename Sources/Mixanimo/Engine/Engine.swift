@@ -22,7 +22,8 @@ final class Engine {
             var uid: String
             var deviceID: AudioDeviceID
             var sampleRate: Double
-            var bufferFrames: UInt32?
+            /// What the device will run at, already clamped to its range.
+            var bufferFrames: UInt32
             var monitor: Bool
         }
 
@@ -30,12 +31,17 @@ final class Engine {
             var uid: String
             var deviceID: AudioDeviceID
             var sampleRate: Double
+            /// One IO cycle of this input, in mic mix frames.
+            var blockFrames: Int
         }
 
         var virtualRate: Double = 0
         var feedFrames: Int = 0
         var outputs: [Output] = []
         var inputs: [Input] = []
+
+        /// The largest block any input writes into a monitor ring at once.
+        var inputBlockFrames: Int { inputs.map(\.blockFrames).max() ?? 0 }
     }
 
     private let model: AppModel
@@ -56,6 +62,9 @@ final class Engine {
 
     /// Frames the feed has read from the virtual device since the graph was last built.
     var feedFrames: Int { feed?.frames.value ?? 0 }
+
+    /// One IO cycle of the feed, in virtual frames, as the virtual device took it.
+    private(set) var feedBlockFrames = 0
 
     /// `managesDefaults` off leaves the machine's default devices alone, which is what a test that
     /// must not disturb the running system wants.
@@ -185,9 +194,7 @@ final class Engine {
 
     private func makePlan() -> Plan {
         guard let virtual = virtualDevice else { return Plan() }
-        var wanted = Plan(
-            virtualRate: model.settings.virtualRate,
-            feedFrames: Int((try? virtual.bufferFrameSize) ?? 512))
+        var wanted = Plan(virtualRate: model.settings.virtualRate)
 
         let outputUIDs = Set(model.settings.outputs.filter(\.value.enabled).keys)
         for uid in Engine.ordered(outputUIDs, listed: model.devices.outputs) {
@@ -197,18 +204,41 @@ final class Engine {
                 Plan.Output(
                     uid: uid, deviceID: device.id,
                     sampleRate: (try? device.nominalSampleRate) ?? 0,
-                    bufferFrames: settings.bufferFrames, monitor: settings.monitor))
+                    bufferFrames: OutputNode.effectiveBufferFrames(device, settings.bufferFrames),
+                    monitor: settings.monitor))
         }
         let inputUIDs = Set(model.settings.inputs.filter(\.value.enabled).keys)
         for uid in Engine.ordered(inputUIDs, listed: model.devices.inputs) {
             guard uid != AppModel.micDeviceUID, uid != AppModel.outputDeviceUID,
                 let device = Engine.present(uid)
             else { continue }
+            let rate = (try? device.nominalSampleRate) ?? 0
+            let block = Int((try? device.bufferFrameSize) ?? 512)
             wanted.inputs.append(
                 Plan.Input(
-                    uid: uid, deviceID: device.id, sampleRate: (try? device.nominalSampleRate) ?? 0))
+                    uid: uid, deviceID: device.id, sampleRate: rate,
+                    blockFrames: rate > 0
+                        ? Int((Double(block) * micMixRate / rate).rounded(.up)) : block))
         }
+        wanted.feedFrames = Engine.feedFrames(
+            for: wanted.outputs, virtualRate: wanted.virtualRate,
+            range: try? virtual.bufferFrameSizeRange)
         return wanted
+    }
+
+    /// The feed block, in virtual frames: the shortest block any enabled output pulls, so a wired
+    /// output at 32 frames is not held to the process default. Without an output there is nothing to
+    /// feed, and 512 keeps the virtual device on the size the HAL hands a client by default.
+    private static func feedFrames(
+        for outputs: [Plan.Output], virtualRate: Double, range: ClosedRange<UInt32>?
+    ) -> Int {
+        let blocks = outputs.compactMap { output -> UInt32? in
+            guard output.sampleRate > 0 else { return nil }
+            return UInt32((Double(output.bufferFrames) * virtualRate / output.sampleRate).rounded(.up))
+        }
+        guard let smallest = blocks.min() else { return 512 }
+        guard let range else { return Int(smallest) }
+        return Int(min(max(smallest, range.lowerBound), range.upperBound))
     }
 
     /// `wanted` in the order the device list shows them, followed by the ones the list leaves out
@@ -231,20 +261,27 @@ final class Engine {
     private func build() {
         guard let virtual = virtualDevice else { return }
 
+        // Every output ring is topped up one feed block at a time and primes against it, so the feed
+        // takes its size before the outputs are sized, and they follow what the device really gives.
+        try? virtual.setBufferFrameSize(UInt32(plan.feedFrames))
+        feedBlockFrames = Int((try? virtual.bufferFrameSize) ?? UInt32(plan.feedFrames))
+
         for item in plan.outputs {
             do {
                 outputs.append(
                     try OutputNode(
                         uid: item.uid, device: AudioDevice(id: item.deviceID),
                         settings: model.output(item.uid), virtualRate: plan.virtualRate,
-                        feedBlockFrames: plan.feedFrames, inputs: plan.inputs.count))
+                        feedBlockFrames: feedBlockFrames, inputs: plan.inputs.count,
+                        inputBlockFrames: plan.inputBlockFrames))
             } catch {
                 log.error("output \(item.uid, privacy: .public): \(String(describing: error), privacy: .public)")
             }
         }
 
         if !plan.inputs.isEmpty, let mic = micDevice {
-            micDrain = try? MicDrainNode(device: mic, inputs: plan.inputs.count)
+            micDrain = try? MicDrainNode(
+                device: mic, inputs: plan.inputs.count, inputBlockFrames: plan.inputBlockFrames)
         }
 
         for (index, item) in plan.inputs.enumerated() {
@@ -285,6 +322,7 @@ final class Engine {
         micDrain = nil
         for output in outputs { output.stop() }
         outputs = []
+        feedBlockFrames = 0
     }
 
     // MARK: Parameters
@@ -323,7 +361,8 @@ final class Engine {
         }
     }
 
-    private func pollCounters() {
+    /// Copies what the IO threads counted into the status the UI reads.
+    func pollCounters() {
         for node in outputs {
             model.outputStatus[node.uid]?.underruns = node.underruns.value
         }
@@ -354,7 +393,7 @@ final class Engine {
         return clamped * clamped * clamped
     }
 
-    /// Keeps the master gain and the feed's block size in step with the virtual device.
+    /// Keeps the master gain in step with the virtual device's volume control.
     private func watchVirtualDevice() {
         guard let device = virtualDevice else { return }
         let master: [AudioObjectPropertySelector] = [
@@ -369,10 +408,6 @@ final class Engine {
                 self?.readMaster()
             }
         }
-        let sizes = try? AudioObjectPropertyListener(
-            device.id, AudioObjectPropertyAddress(kAudioDevicePropertyBufferFrameSize),
-            handler: { [weak self] _ in self?.apply() })
-        if let sizes { listeners.append(sizes) }
     }
 
     private func readMaster() {

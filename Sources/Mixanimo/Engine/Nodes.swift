@@ -46,18 +46,20 @@ struct MonitorTap: @unchecked Sendable {
     private let part: UnsafeMutablePointer<Float>
     private let state: UnsafeMutablePointer<State>
 
-    /// `rate` and `frames` describe the consumer's IO cycle.
-    init(inputs: Int, rate: Double, frames: Int) {
+    /// `rate` and `frames` describe the consumer's IO cycle; `producerFrames` is the largest block
+    /// an input writes at once, in mic mix frames.
+    init(inputs: Int, producerFrames: Int, rate: Double, frames: Int) {
         baseRatio = micMixRate / rate
         let resampler = Resampler(
             channels: 1, ratio: baseRatio, maxDownsampleFactor: max(1, (baseRatio * 1.01).rounded(.up)))
         capacity = Int((Double(frames) * baseRatio * 1.01).rounded(.up)) + 2 * resampler.tapsPerSide + 8
-        // One pull, plus a second one of margin and room for one input block, is the shortest the
-        // monitor can run without gaps; the fill sweeps down half a block between input writes, so
-        // the average sits there.
+        // An input arrives one whole block at a time, so the ring waits for that much plus two pulls
+        // before it plays; anything less runs dry at the end of every input cycle.
         let pull = Double(frames) * baseRatio + Double(resampler.tapsPerSide) + 1
-        primeLevel = 2 * pull + 256
-        drift = DriftController(targetFillFrames: primeLevel - 128)
+        primeLevel = Double(producerFrames) + 2 * pull
+        // The fill sweeps a whole input block between writes, so its average sits half a block below
+        // the level that started it; aiming there leaves the ratio at rest.
+        drift = DriftController(targetFillFrames: primeLevel - Double(producerFrames) / 2)
 
         rings = .allocate(capacity: inputs)
         let ringFrames = nextPowerOfTwo(max(4 * (Int(primeLevel) + capacity), 2048))
@@ -204,23 +206,15 @@ final class OutputNode {
 
     init(
         uid: String, device: AudioDevice, settings: OutputSettings, virtualRate: Double,
-        feedBlockFrames: Int, inputs: Int
+        feedBlockFrames: Int, inputs: Int, inputBlockFrames: Int
     ) throws {
         self.uid = uid
         self.device = device
         sampleRate = try device.nominalSampleRate
 
-        let wanted = settings.bufferFrames ?? OutputNode.defaultBufferFrames(device.transportType)
-        if let range = try? device.bufferFrameSizeRange {
-            try? device.setBufferFrameSize(min(max(wanted, range.lowerBound), range.upperBound))
-        }
+        let wanted = OutputNode.effectiveBufferFrames(device, settings.bufferFrames)
+        try? device.setBufferFrameSize(wanted)
         bufferFrames = Int((try? device.bufferFrameSize) ?? wanted)
-        latency = OutputLatency(
-            deviceLatency: Int((try? device.latency(scope: .output)) ?? 0),
-            safetyOffset: Int((try? device.safetyOffset(scope: .output)) ?? 0),
-            streamLatency: Int((try? device.streamLatency(scope: .output)) ?? 0),
-            bufferSize: bufferFrames,
-            sampleRate: sampleRate)
 
         let baseRatio = virtualRate / sampleRate
         let resampler = Resampler(
@@ -236,6 +230,13 @@ final class OutputNode {
         // keeps that wander under a tenth of a per cent of pitch instead of an audible slow wow.
         let drift = DriftController(
             targetFillFrames: primeFrames - Double(feedBlockFrames) / 2, gain: 1e-5)
+        latency = OutputLatency(
+            deviceLatency: Int((try? device.latency(scope: .output)) ?? 0),
+            safetyOffset: Int((try? device.safetyOffset(scope: .output)) ?? 0),
+            streamLatency: Int((try? device.streamLatency(scope: .output)) ?? 0),
+            bufferSize: bufferFrames,
+            ringFill: Int((drift.targetFillFrames / baseRatio).rounded()),
+            sampleRate: sampleRate)
         ring = RingBuffer(
             capacityFrames: nextPowerOfTwo(max(4 * (Int(primeFrames) + feedCapacity), 4096)),
             channels: 2)
@@ -243,7 +244,10 @@ final class OutputNode {
         delay = DelayLine(
             maxDelayFrames: max(1024, Int(sampleRate / 2)), channels: 2, crossfadeFrames: 256)
         tap = (settings.monitor && inputs > 0)
-            ? MonitorTap(inputs: inputs, rate: sampleRate, frames: bufferFrames) : nil
+            ? MonitorTap(
+                inputs: inputs, producerFrames: inputBlockFrames, rate: sampleRate,
+                frames: bufferFrames)
+            : nil
 
         feedScratch = .allocate(capacity: feedCapacity * 2)
         feedScratch.initialize(repeating: 0, count: feedCapacity * 2)
@@ -329,6 +333,15 @@ final class OutputNode {
     /// 256 frames for Bluetooth, which cannot keep up with less, and 128 for everything else.
     static func defaultBufferFrames(_ transport: AudioDevice.TransportType) -> UInt32 {
         transport == .bluetooth || transport == .bluetoothLE ? 256 : 128
+    }
+
+    /// The size the device runs at once this node has it: the setting or the transport default,
+    /// clamped to what the device accepts. The feed is sized against this, so it is answered before
+    /// the node exists.
+    static func effectiveBufferFrames(_ device: AudioDevice, _ wanted: UInt32?) -> UInt32 {
+        let frames = wanted ?? defaultBufferFrames(device.transportType)
+        guard let range = try? device.bufferFrameSizeRange else { return frames }
+        return min(max(frames, range.lowerBound), range.upperBound)
     }
 
     func start() throws { try proc?.start() }
@@ -434,10 +447,11 @@ final class MicDrainNode {
     private let blockFrames: Int
     private var proc: IOProc?
 
-    init(device: AudioDevice, inputs: Int) throws {
+    init(device: AudioDevice, inputs: Int, inputBlockFrames: Int) throws {
         let cycleFrames = Int((try? device.bufferFrameSize) ?? 512)
         blockFrames = 2 * max(cycleFrames, 512)
-        tap = MonitorTap(inputs: inputs, rate: micMixRate, frames: cycleFrames)
+        tap = MonitorTap(
+            inputs: inputs, producerFrames: inputBlockFrames, rate: micMixRate, frames: cycleFrames)
         mono = .allocate(capacity: blockFrames)
         mono.initialize(repeating: 0, count: blockFrames)
 

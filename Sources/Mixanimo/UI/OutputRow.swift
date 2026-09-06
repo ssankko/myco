@@ -1,24 +1,37 @@
 import SwiftUI
 
-/// One physical output. Off, it costs a single line; on, it opens into its full chain so the
-/// popover stays readable with a dozen devices attached.
+/// One physical output. Off, it is a quiet single line; on, it becomes a card that shows the level
+/// it carries and the controls the user reaches for while playing.
 struct OutputRow: View {
     let model: AppModel
     let entry: DeviceEntry
     @Environment(\.openWindow) private var openWindow
 
+    /// The buffer size, the sync trim and the measured latency, which are set once and then left.
+    @State private var showsMore = false
+    @State private var isHovered = false
+
     private var settings: OutputSettings { model.output(entry.id) }
     private var status: OutputStatus { model.outputStatus[entry.id] ?? OutputStatus() }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 7) {
             header
             if settings.enabled { chain }
         }
-        .padding(.vertical, 5)
+        .padding(.trailing, 9)
+        .padding(.vertical, settings.enabled ? Theme.cardPadding : 5)
         .rail(settings.enabled ? (status.isActive ? .live : .armed) : .off)
+        .background(fill, in: .rect(cornerRadius: Theme.cardRadius))
+        .onHover { isHovered = $0 }
         .animation(.snappy(duration: 0.18), value: settings.enabled)
         .animation(.snappy(duration: 0.18), value: settings.monitor)
+        .animation(.snappy(duration: 0.18), value: showsMore)
+    }
+
+    private var fill: Color {
+        if settings.enabled { return isHovered ? Theme.cardFillHover : Theme.cardFill }
+        return isHovered ? Theme.rowFillHover : .clear
     }
 
     private var header: some View {
@@ -29,29 +42,32 @@ struct OutputRow: View {
                 .tint(Theme.signal)
                 .labelsHidden()
                 .accessibilityLabel("Play to \(entry.name)")
+            DeviceIcon(
+                name: entry.name, transport: entry.device.transportType, isOn: settings.enabled)
             Text(entry.name)
                 .font(.system(size: 12, weight: .medium))
                 .lineLimit(1)
                 .truncationMode(.middle)
                 .foregroundStyle(settings.enabled ? .primary : .secondary)
-            TransportGlyph(transport: entry.device.transportType)
-            Spacer(minLength: 0)
+            Spacer(minLength: 6)
+            TransportTag(transport: entry.device.transportType)
+            if settings.enabled {
+                MoreToggle(label: "More settings for \(entry.name)", isOn: $showsMore)
+            }
         }
     }
 
     @ViewBuilder
     private var chain: some View {
-        MeterSlider(
-            label: "\(entry.name) volume", value: gain, range: -60...12, step: 0.5,
-            readout: "\(Readout.decibels(settings.gainDB)) dB", readoutWidth: 58)
+        LevelMeter(peak: status.peak, hold: status.peakHold)
 
         HStack(spacing: 8) {
-            bufferPicker
+            MeterSlider(
+                label: "\(entry.name) volume", value: gain, range: -60...12, step: 0.5,
+                readout: "\(Readout.decibels(settings.gainDB)) dB", readoutWidth: 58)
             GlyphToggle(
                 label: "Monitor microphones on \(entry.name)", symbol: "ear",
                 isOn: binding(\.monitor))
-            if model.settings.sync { syncTrim }
-            Spacer(minLength: 0)
             Button("EQ") { openWindow(id: "eq", value: entry.id) }
                 .buttonStyle(.borderless)
                 .controlSize(.small)
@@ -60,14 +76,29 @@ struct OutputRow: View {
         }
 
         if settings.monitor {
-            MeterSlider(
-                label: "Monitor level on \(entry.name)", value: monitorGain, range: -60...12,
-                step: 0.5, readout: "\(Readout.decibels(settings.monitorGainDB)) dB",
-                readoutWidth: 58)
-            .padding(.leading, 14)
+            HStack(spacing: 6) {
+                Image(systemName: "ear")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.tertiary)
+                    .frame(width: 12)
+                    .accessibilityHidden(true)
+                MeterSlider(
+                    label: "Monitor level on \(entry.name)", value: monitorGain, range: -60...12,
+                    step: 0.5, readout: "\(Readout.decibels(settings.monitorGainDB)) dB",
+                    readoutWidth: 58)
+            }
         }
 
-        statusLine
+        if showsMore { more }
+    }
+
+    private var more: some View {
+        HStack(spacing: 8) {
+            bufferPicker
+            if model.settings.sync { syncTrim }
+            Spacer(minLength: 4)
+            statusLine
+        }
     }
 
     private var bufferPicker: some View {
@@ -80,6 +111,7 @@ struct OutputRow: View {
         .labelsHidden()
         .controlSize(.small)
         .frame(width: 76)
+        .help("Frames the device plays per cycle. Less is faster and needs more of the machine.")
         .accessibilityLabel("Buffer size for \(entry.name), in frames")
     }
 
@@ -90,15 +122,18 @@ struct OutputRow: View {
                 .foregroundStyle(.secondary)
         }
         .controlSize(.mini)
+        .help("Extra delay for this output on top of the one Align outputs computes.")
         .accessibilityLabel("Sync trim for \(entry.name)")
         .accessibilityValue("\(Readout.milliseconds(settings.syncTrimMilliseconds)) milliseconds")
     }
 
     private var statusLine: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 8) {
             if status.isActive {
-                Text("\(Readout.milliseconds(status.latencyMilliseconds)) ms latency")
-                Text("\(Readout.milliseconds(status.delayMilliseconds)) ms delay")
+                Text("\(Readout.milliseconds(status.latencyMilliseconds)) ms out")
+                if status.delayMilliseconds > 0 {
+                    Text("\(Readout.milliseconds(status.delayMilliseconds)) ms delay")
+                }
                 if status.underruns > 0 {
                     Text("\(status.underruns) underruns").foregroundStyle(Theme.caution)
                 }

@@ -52,54 +52,81 @@ extension View {
     }
 }
 
-/// A section title with the one fact worth knowing about the section on the right.
+/// A section title, what the section does to the audio, and how much of it is on.
 struct SectionHeader: View {
     let title: String
+    let caption: String
     let detail: String
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline) {
-            Text(title).font(.system(size: 11, weight: .semibold))
-            Spacer(minLength: 8)
-            Text(detail)
-                .font(.system(size: 10.5).monospacedDigit())
+        VStack(alignment: .leading, spacing: 1) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(title).font(.system(size: 12, weight: .semibold))
+                Spacer(minLength: 8)
+                Text(detail)
+                    .font(.system(size: 10.5).monospacedDigit())
+                    .foregroundStyle(.tertiary)
+            }
+            Text(caption)
+                .font(.system(size: 10.5))
                 .foregroundStyle(.tertiary)
         }
-        .foregroundStyle(.secondary)
         .accessibilityElement(children: .combine)
     }
 }
 
-/// How the device is wired, at a glance. Bluetooth is drawn because SF Symbols has no rune for it.
-struct TransportGlyph: View {
+/// What the device is, from the name it reports and the way it is wired: the picture that finds a
+/// pair of headphones in a list faster than its name does.
+struct DeviceIcon: View {
+    let name: String
     let transport: AudioDevice.TransportType
+    var isInput = false
+    var isOn = false
 
     var body: some View {
-        Group {
-            switch transport {
-            case .bluetooth, .bluetoothLE: BluetoothRune().stroke(style: .init(lineWidth: 1.2, lineJoin: .round))
-            default: Image(systemName: symbol).imageScale(.small)
-            }
-        }
-        .frame(width: 11, height: 12)
-        .foregroundStyle(.tertiary)
-        .accessibilityLabel(name)
+        Image(systemName: symbol)
+            .font(.system(size: 12))
+            .frame(width: 18, height: 15)
+            .foregroundStyle(isOn ? AnyShapeStyle(Theme.signal) : AnyShapeStyle(.secondary))
+            .accessibilityHidden(true)
     }
 
     private var symbol: String {
+        let lowered = name.lowercased()
+        if lowered.contains("airpod") { return "airpods" }
+        if isInput { return "mic" }
+        if ["headphone", "headset", "earphone", "buds", "beats"].contains(where: lowered.contains) {
+            return "headphones"
+        }
         switch transport {
-        case .builtIn: "laptopcomputer"
-        case .usb: "cable.connector"
-        case .virtual: "circle.dotted"
-        case .aggregate: "square.stack.3d.up"
-        case .airPlay: "airplayaudio"
-        case .continuity: "iphone"
-        default: "speaker.wave.2"
+        case .builtIn: return "hifispeaker"
+        case .bluetooth, .bluetoothLE: return "headphones"
+        case .usb: return "cable.connector"
+        case .airPlay: return "airplayaudio"
+        case .continuity: return "iphone"
+        case .aggregate: return "square.stack.3d.up"
+        default: return "speaker.wave.2"
         }
     }
+}
 
-    private var name: String {
-        switch transport {
+/// How the device is wired, in a word.
+struct TransportTag: View {
+    let transport: AudioDevice.TransportType
+
+    var body: some View {
+        Text(transport.title)
+            .font(.system(size: 9.5, weight: .medium))
+            .foregroundStyle(.tertiary)
+            .lineLimit(1)
+            .fixedSize()
+            .accessibilityLabel("Connected over \(transport.title)")
+    }
+}
+
+extension AudioDevice.TransportType {
+    var title: String {
+        switch self {
         case .builtIn: "Built in"
         case .bluetooth, .bluetoothLE: "Bluetooth"
         case .usb: "USB"
@@ -107,23 +134,59 @@ struct TransportGlyph: View {
         case .aggregate: "Aggregate"
         case .airPlay: "AirPlay"
         case .continuity: "Continuity"
-        default: "Other connection"
+        default: "Other"
         }
     }
 }
 
-/// The Bluetooth rune: a vertical stem crossed twice, with two flags to the upper and lower right.
-private struct BluetoothRune: Shape {
-    func path(in rect: CGRect) -> Path {
-        let x = rect.minX, w = rect.width, y = rect.minY, h = rect.height
-        var path = Path()
-        path.move(to: CGPoint(x: x + w * 0.15, y: y + h * 0.28))
-        path.addLine(to: CGPoint(x: x + w * 0.85, y: y + h * 0.72))
-        path.addLine(to: CGPoint(x: x + w * 0.5, y: y + h))
-        path.addLine(to: CGPoint(x: x + w * 0.5, y: y))
-        path.addLine(to: CGPoint(x: x + w * 0.85, y: y + h * 0.28))
-        path.addLine(to: CGPoint(x: x + w * 0.15, y: y + h * 0.72))
-        return path
+/// The level a device carries: a bar to the peak of the last poll with the recent peak held ahead
+/// of it. Hidden from VoiceOver, which has no use for a bar that moves thirty times a second.
+struct LevelMeter: View {
+    let peak: Float
+    let hold: Float
+
+    var body: some View {
+        GeometryReader { proxy in
+            let width = proxy.size.width
+            ZStack(alignment: .leading) {
+                Capsule().fill(Theme.meterTrack)
+                Capsule().fill(Theme.signal).frame(width: width * fraction(peak))
+                Capsule()
+                    .fill(hold >= 0.99 ? Theme.stopped : Theme.signal)
+                    .frame(width: 2)
+                    .offset(x: max(0, width * fraction(hold) - 2))
+                    .opacity(hold > 0 ? 1 : 0)
+            }
+        }
+        .frame(height: Theme.meterHeight)
+        .accessibilityHidden(true)
+    }
+
+    /// A meter reads in decibels, so the quiet end of the scale still moves. The bar starts 48 dB
+    /// below full scale, which is where game audio stops being audible over a fan.
+    private func fraction(_ level: Float) -> CGFloat {
+        guard level > 0 else { return 0 }
+        return CGFloat(min(1, max(0, (linearToDecibels(level) + 48) / 48)))
+    }
+}
+
+/// Opens the part of a card the user sets once and leaves alone.
+struct MoreToggle: View {
+    let label: String
+    @Binding var isOn: Bool
+
+    var body: some View {
+        Button { isOn.toggle() } label: {
+            Image(systemName: "chevron.down")
+                .font(.system(size: 9, weight: .semibold))
+                .rotationEffect(.degrees(isOn ? 0 : -90))
+                .frame(width: 14, height: 14)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.borderless)
+        .foregroundStyle(.secondary)
+        .accessibilityLabel(label)
+        .accessibilityValue(isOn ? "shown" : "hidden")
     }
 }
 

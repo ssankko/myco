@@ -10,7 +10,6 @@ struct Popover: View {
     /// The master position while the thumb is held. The engine answers through the driver, which
     /// takes a moment, and a slider that springs back mid-drag is unusable.
     @State private var masterDraft: Float?
-    @State private var showsSettings = false
 
     private var outputs: [DeviceEntry] { model.devices.outputs.routable }
     private var inputs: [DeviceEntry] { model.devices.inputs.routable }
@@ -88,19 +87,27 @@ struct Popover: View {
 
     @ViewBuilder
     private var devices: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            SectionHeader(title: "Outputs", detail: onCount(outputs.count, model.settings.outputs.values.filter(\.enabled).count))
+        VStack(alignment: .leading, spacing: 3) {
+            SectionHeader(
+                title: "Listen",
+                caption: "Every device here plays the game",
+                detail: onCount(outputs.count, model.settings.outputs.values.filter(\.enabled).count))
+                .padding(.bottom, 2)
             if outputs.isEmpty {
-                EmptyLane(text: "No output devices are attached.")
+                EmptyLane(text: "Nothing to play to. Connect headphones or speakers.")
             } else {
                 ForEach(outputs) { OutputRow(model: model, entry: $0) }
             }
         }
 
-        VStack(alignment: .leading, spacing: 2) {
-            SectionHeader(title: "Microphones", detail: onCount(inputs.count, model.settings.inputs.values.filter(\.enabled).count))
+        VStack(alignment: .leading, spacing: 3) {
+            SectionHeader(
+                title: "Talk",
+                caption: "These microphones become Mixanimo Mic in Steam",
+                detail: onCount(inputs.count, model.settings.inputs.values.filter(\.enabled).count))
+                .padding(.bottom, 2)
             if inputs.isEmpty {
-                EmptyLane(text: "No microphones are attached.")
+                EmptyLane(text: "Nothing to mix in. Connect a microphone.")
             } else {
                 ForEach(inputs) { InputRow(model: model, entry: $0) }
             }
@@ -108,7 +115,7 @@ struct Popover: View {
     }
 
     private var footer: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 9) {
             HStack {
                 Picker("Virtual rate", selection: $model.settings.virtualRate) {
                     ForEach(Settings.availableRates, id: \.self) { rate in
@@ -128,24 +135,24 @@ struct Popover: View {
                     .help("Delays every output to match the slowest one.")
             }
 
-            DisclosureGroup("Settings", isExpanded: $showsSettings) {
-                VStack(alignment: .leading, spacing: 8) {
-                    Toggle("Keep Mixanimo as the system device", isOn: $model.settings.pinDefaults)
+            Divider().opacity(0.6)
+
+            VStack(alignment: .leading, spacing: 7) {
+                Toggle("Keep Mixanimo as the system device", isOn: $model.settings.pinDefaults)
+                HStack {
                     Toggle("Open at login", isOn: $model.settings.launchAtLogin)
+                    Spacer(minLength: 8)
                     if model.driver.isReady {
                         Button("Remove driver") { actions.run(actions.uninstall) }
                             .buttonStyle(.link)
+                            .font(.system(size: 11))
                             .disabled(actions.uninstall == nil || actions.isWorking)
                     }
                 }
-                .toggleStyle(.checkbox)
-                .controlSize(.small)
-                .padding(.top, 6)
-                .padding(.leading, 2)
-                .frame(maxWidth: .infinity, alignment: .leading)
             }
+            .toggleStyle(.checkbox)
+            .controlSize(.small)
             .font(.system(size: 11))
-            .foregroundStyle(.secondary)
 
             Button("Quit Mixanimo") { NSApplication.shared.terminate(nil) }
                 .buttonStyle(.borderless)

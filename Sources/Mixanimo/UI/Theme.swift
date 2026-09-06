@@ -14,9 +14,20 @@ enum Theme {
     /// Hairline the rails and dividers share, so an idle row still shows its lane.
     static let track = Color.primary.opacity(0.11)
 
+    /// Behind a device that carries audio, and the same fill lifted under the pointer.
+    static let cardFill = signal.opacity(0.08)
+    static let cardFillHover = signal.opacity(0.15)
+    /// Under the pointer on a device that is off.
+    static let rowFillHover = Color.primary.opacity(0.06)
+    /// The unlit part of a level meter.
+    static let meterTrack = Color.primary.opacity(0.13)
+
     static let rowGap: CGFloat = 10
     static let sectionGap: CGFloat = 14
-    static let popoverWidth: CGFloat = 348
+    static let cardRadius: CGFloat = 8
+    static let cardPadding: CGFloat = 8
+    static let meterHeight: CGFloat = 3
+    static let popoverWidth: CGFloat = 380
 
     private static func dynamic(
         light: (Double, Double, Double), dark: (Double, Double, Double)

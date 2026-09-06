@@ -5,10 +5,13 @@ struct InputRow: View {
     let model: AppModel
     let entry: DeviceEntry
 
+    @State private var isHovered = false
+
     private var settings: InputSettings { model.input(entry.id) }
+    private var status: InputStatus { model.inputStatus[entry.id] ?? InputStatus() }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 7) {
             HStack(spacing: 6) {
                 Toggle("Mix in \(entry.name)", isOn: binding(\.enabled))
                     .toggleStyle(.switch)
@@ -16,15 +19,19 @@ struct InputRow: View {
                     .tint(Theme.signal)
                     .labelsHidden()
                     .accessibilityLabel("Mix in \(entry.name)")
+                DeviceIcon(
+                    name: entry.name, transport: entry.device.transportType, isInput: true,
+                    isOn: settings.enabled)
                 Text(entry.name)
                     .font(.system(size: 12, weight: .medium))
                     .lineLimit(1)
                     .truncationMode(.middle)
                     .foregroundStyle(settings.enabled ? .primary : .secondary)
-                TransportGlyph(transport: entry.device.transportType)
-                Spacer(minLength: 0)
+                Spacer(minLength: 6)
+                TransportTag(transport: entry.device.transportType)
             }
             if settings.enabled {
+                LevelMeter(peak: status.peak, hold: status.peakHold)
                 HStack(spacing: 8) {
                     MeterSlider(
                         label: "\(entry.name) gain", value: gain, range: -60...24, step: 0.5,
@@ -36,9 +43,17 @@ struct InputRow: View {
                 }
             }
         }
-        .padding(.vertical, 5)
+        .padding(.trailing, 9)
+        .padding(.vertical, settings.enabled ? Theme.cardPadding : 5)
         .rail(settings.enabled ? (settings.muted ? .armed : .live) : .off)
+        .background(fill, in: .rect(cornerRadius: Theme.cardRadius))
+        .onHover { isHovered = $0 }
         .animation(.snappy(duration: 0.18), value: settings.enabled)
+    }
+
+    private var fill: Color {
+        if settings.enabled { return isHovered ? Theme.cardFillHover : Theme.cardFill }
+        return isHovered ? Theme.rowFillHover : .clear
     }
 
     private func binding<T>(_ key: WritableKeyPath<InputSettings, T>) -> Binding<T> {

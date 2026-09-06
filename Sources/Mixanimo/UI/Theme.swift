@@ -19,11 +19,15 @@ enum Theme {
     static let cardFillHover = signal.opacity(0.15)
     /// Under the pointer on a device that is off.
     static let rowFillHover = Color.primary.opacity(0.06)
+    /// Around a small button, so it reads as one before the pointer reaches it.
+    static let border = Color.primary.opacity(0.22)
 
     static let rowGap: CGFloat = 10
     static let sectionGap: CGFloat = 14
     static let cardRadius: CGFloat = 8
     static let cardPadding: CGFloat = 8
+    static let glyphHeight: CGFloat = 19
+    static let glyphRadius: CGFloat = 5
     static let popoverWidth: CGFloat = 380
 
     private static func dynamic(

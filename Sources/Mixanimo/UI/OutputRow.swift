@@ -66,11 +66,14 @@ struct OutputRow: View {
             GlyphToggle(
                 label: "Monitor microphones on \(entry.name)", symbol: "ear",
                 isOn: binding(\.monitor))
-            Button("EQ") { openWindow(id: "eq", value: entry.id) }
-                .buttonStyle(.borderless)
-                .controlSize(.small)
-                .foregroundStyle(Theme.signal)
-                .accessibilityLabel("Open the equaliser for \(entry.name)")
+            Button { openWindow(id: "eq", value: entry.id) } label: {
+                Text("EQ")
+                    .font(.system(size: 11, weight: .medium))
+                    .glyphChrome(tint: Theme.signal)
+            }
+            .buttonStyle(.borderless)
+            .help("Equaliser for \(entry.name)")
+            .accessibilityLabel("Open the equaliser for \(entry.name)")
         }
 
         if settings.monitor {

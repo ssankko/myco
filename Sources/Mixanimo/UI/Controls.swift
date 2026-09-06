@@ -178,6 +178,21 @@ struct MeterSlider: View {
     }
 }
 
+/// The box every small button in a card wears: a hairline border, and the accent filled in while
+/// the control is on.
+extension View {
+    func glyphChrome(isOn: Bool = false, tint: Color = .secondary) -> some View {
+        padding(.horizontal, 5)
+            .frame(height: Theme.glyphHeight)
+            .foregroundStyle(isOn ? .white : tint)
+            .background(isOn ? Theme.signal : .clear, in: .rect(cornerRadius: Theme.glyphRadius))
+            .overlay {
+                RoundedRectangle(cornerRadius: Theme.glyphRadius)
+                    .strokeBorder(isOn ? Theme.signal : Theme.border, lineWidth: 1)
+            }
+    }
+}
+
 /// A glyph that toggles, for mute and monitor. The button style carries the on state to
 /// VoiceOver by itself.
 struct GlyphToggle: View {
@@ -187,13 +202,13 @@ struct GlyphToggle: View {
 
     var body: some View {
         Toggle(isOn: $isOn) {
-            Image(systemName: symbol).imageScale(.small).frame(width: 14)
+            Image(systemName: symbol)
+                .imageScale(.small)
+                .frame(width: 14)
+                .glyphChrome(isOn: isOn)
         }
         .toggleStyle(.button)
         .buttonStyle(.borderless)
-        .controlSize(.small)
-        .tint(Theme.signal)
-        .foregroundStyle(isOn ? Theme.signal : Color.secondary)
         .help(label)
         .accessibilityLabel(label)
     }

@@ -23,8 +23,7 @@ struct Popover: View {
                 DriverRow(status: model.driver, actions: actions)
             }
             Divider().opacity(0.6)
-            // The menu bar window proposes no height, so a scroll view here collapses to nothing
-            // unless it is given one. Short lists skip it and let the window grow.
+            // A short list lets the popover grow to fit; a long one scrolls at a fixed height.
             if outputs.count + inputs.count <= 8 {
                 deviceStack
             } else {

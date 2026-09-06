@@ -6,10 +6,10 @@ import os
 
 /// The running audio graph.
 ///
-/// One IO proc reads the `Mixanimo` device and copies the feed into a ring per enabled output; each
-/// output's own IO proc pulls that ring through a resampler, the mic monitor, the EQ, the delay and
-/// the gains. Enabled inputs are summed to the mic mix at 48 kHz, which the `Mixanimo Mic` device
-/// publishes and every monitoring output taps directly.
+/// Every enabled output has one IO proc, which reads the driver's shared ring directly and pulls it
+/// through a resampler, the mic monitor, the EQ, the delay and the gains. Enabled inputs are summed
+/// to the mic mix at 48 kHz, which the `Mixanimo Mic` device publishes and every monitoring output
+/// taps directly.
 ///
 /// The engine watches `model.settings` and the device list and reconciles the graph against them.
 /// Anything that changes the shape of the graph rebuilds it; gains, EQ bands and delays are pushed
@@ -35,8 +35,8 @@ final class Engine {
             var blockFrames: Int
         }
 
+        /// The rate the shared ring runs at, which the engine sets from `settings.virtualRate`.
         var virtualRate: Double = 0
-        var feedFrames: Int = 0
         var outputs: [Output] = []
         var inputs: [Input] = []
 
@@ -51,7 +51,7 @@ final class Engine {
 
     private var running = false
     private var plan = Plan()
-    private var feed: FeedNode?
+    private var feed: SharedFeed?
     private var outputs: [OutputNode] = []
     private var inputs: [InputNode] = []
     private var micDrain: MicDrainNode?
@@ -59,12 +59,8 @@ final class Engine {
     private var eventTask: Task<Void, Never>?
     private var statusTask: Task<Void, Never>?
     private var launchAtLoginApplied: Bool?
-
-    /// Frames the feed has read from the virtual device since the graph was last built.
-    var feedFrames: Int { feed?.frames.value ?? 0 }
-
-    /// One IO cycle of the feed, in virtual frames, as the virtual device took it.
-    private(set) var feedBlockFrames = 0
+    /// UIDs already reported as playing, so the log line lands once per graph.
+    private var playing: Set<String> = []
 
     /// `managesDefaults` off leaves the machine's default devices alone, which is what a test that
     /// must not disturb the running system wants.
@@ -115,6 +111,8 @@ final class Engine {
         statusTask = nil
         listeners = []
         teardown()
+        feed?.unmap()
+        feed = nil
         plan = Plan()
         model.outputStatus = [:]
         if managesDefaults { defaultDevices.restore() }
@@ -193,8 +191,10 @@ final class Engine {
     }
 
     private func makePlan() -> Plan {
-        guard let virtual = virtualDevice else { return Plan() }
-        var wanted = Plan(virtualRate: model.settings.virtualRate)
+        // The rate in the header is the rate the samples in the ring were written at, so a change
+        // still in flight rebuilds the graph against what the driver really does.
+        guard virtualDevice != nil, let feed = openFeed() else { return Plan() }
+        var wanted = Plan(virtualRate: feed.sampleRate)
 
         let outputUIDs = Set(model.settings.outputs.filter(\.value.enabled).keys)
         for uid in Engine.ordered(outputUIDs, listed: model.devices.outputs) {
@@ -220,25 +220,21 @@ final class Engine {
                     blockFrames: rate > 0
                         ? Int((Double(block) * micMixRate / rate).rounded(.up)) : block))
         }
-        wanted.feedFrames = Engine.feedFrames(
-            for: wanted.outputs, virtualRate: wanted.virtualRate,
-            range: try? virtual.bufferFrameSizeRange)
         return wanted
     }
 
-    /// The feed block, in virtual frames: the shortest block any enabled output pulls, so a wired
-    /// output at 32 frames is not held to the process default. Without an output there is nothing to
-    /// feed, and 512 keeps the virtual device on the size the HAL hands a client by default.
-    private static func feedFrames(
-        for outputs: [Plan.Output], virtualRate: Double, range: ClosedRange<UInt32>?
-    ) -> Int {
-        let blocks = outputs.compactMap { output -> UInt32? in
-            guard output.sampleRate > 0 else { return nil }
-            return UInt32((Double(output.bufferFrames) * virtualRate / output.sampleRate).rounded(.up))
+    /// The mapped ring, opened once and kept for as long as the engine runs. A driver that
+    /// publishes no ring, or one this build cannot read, is a driver the app has to replace.
+    private func openFeed() -> SharedFeed? {
+        if let feed { return feed }
+        do {
+            feed = try SharedFeed.open()
+        } catch {
+            log.error("shared feed: \(String(describing: error), privacy: .public)")
+            model.driver = .outdated(
+                installed: DriverInstaller.installedVersion() ?? "", bundled: DriverInstaller.bundledVersion)
         }
-        guard let smallest = blocks.min() else { return 512 }
-        guard let range else { return Int(smallest) }
-        return Int(min(max(smallest, range.lowerBound), range.upperBound))
+        return feed
     }
 
     /// `wanted` in the order the device list shows them, followed by the ones the list leaves out
@@ -259,12 +255,7 @@ final class Engine {
     }
 
     private func build() {
-        guard let virtual = virtualDevice else { return }
-
-        // Every output ring is topped up one feed block at a time and primes against it, so the feed
-        // takes its size before the outputs are sized, and they follow what the device really gives.
-        try? virtual.setBufferFrameSize(UInt32(plan.feedFrames))
-        feedBlockFrames = Int((try? virtual.bufferFrameSize) ?? UInt32(plan.feedFrames))
+        guard let feed = openFeed() else { return }
 
         for item in plan.outputs {
             do {
@@ -272,7 +263,7 @@ final class Engine {
                     try OutputNode(
                         uid: item.uid, device: AudioDevice(id: item.deviceID),
                         settings: model.output(item.uid), virtualRate: plan.virtualRate,
-                        feedBlockFrames: feedBlockFrames, inputs: plan.inputs.count,
+                        feed: feed, inputs: plan.inputs.count,
                         inputBlockFrames: plan.inputBlockFrames))
             } catch {
                 log.error("output \(item.uid, privacy: .public): \(String(describing: error), privacy: .public)")
@@ -298,13 +289,10 @@ final class Engine {
             }
         }
 
-        feed = try? FeedNode(device: virtual, rings: outputs.map(\.ring))
-
         // Consumers first, so a producer never writes into a ring nobody drains.
         for output in outputs { try? output.start() }
         try? micDrain?.start()
         for input in inputs { try? input.start() }
-        try? feed?.start()
 
         model.outputStatus = Dictionary(
             uniqueKeysWithValues: outputs.map {
@@ -314,15 +302,13 @@ final class Engine {
 
     /// Tears the graph down producer first, so nothing writes into a ring that is already gone.
     private func teardown() {
-        feed?.stop()
-        feed = nil
         for input in inputs { input.stop() }
         inputs = []
         micDrain?.stop()
         micDrain = nil
         for output in outputs { output.stop() }
         outputs = []
-        feedBlockFrames = 0
+        playing = []
     }
 
     // MARK: Parameters
@@ -365,6 +351,10 @@ final class Engine {
     func pollCounters() {
         for node in outputs {
             model.outputStatus[node.uid]?.underruns = node.underruns.value
+            let frames = node.frames.value
+            if frames > 0, playing.insert(node.uid).inserted {
+                log.info("output \(node.uid, privacy: .public) is playing, \(frames) frames read")
+            }
         }
     }
 

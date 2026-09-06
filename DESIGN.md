@@ -16,12 +16,14 @@ An AudioServerPlugIn loaded by coreaudiod from `/Library/Audio/Plug-Ins/HAL/Mixa
 
 Publishes two devices:
 
-- `Mixanimo` output, stereo, float32. Nominal rate selectable from 44100, 48000, 88200, 96000, 176400, 192000. Exposes a volume control on the output scope so the Mac's volume keys, menu bar slider and HUD act on it.
+- `Mixanimo` output only, stereo, float32. Nominal rate selectable from 44100, 48000, 88200, 96000, 176400, 192000. Exposes a volume control on the output scope so the Mac's volume keys, menu bar slider and HUD act on it.
 - `Mixanimo Mic` input, mono, float32, fixed 48000.
 
-Each device is a loopback ring buffer. For the output device, clients write into the ring and the app reads it back as the device's input stream, one IO cycle of latency. For the mic device the app writes and clients read. The driver's clock is the host clock (`mach_absolute_time`).
+`Mixanimo` publishes its ring in a POSIX shared memory object, `/mixanimo-feed`, mode 0644 with the driver as the only writer. A page of header (magic `MXFD`, layout version, channels, ring frames, sample rate, a generation raised at every load, the write position and the last IO block size) is followed by 131072 interleaved stereo float frames. Clients write into the ring; the first writer of a span overwrites it and clears the gap the last one left, later writers in the same span add, so several games mix. The write position is published with a release store, which is the whole handshake with the app. The app maps the object read only and every physical output reads it directly, so nothing captures an input stream and macOS shows no microphone indicator.
 
-Both devices report `kAudioDevicePropertyIsHidden = true` until a client whose bundle ID is the Mixanimo app attaches (`AddDeviceClient`). They hide again when that client detaches (`RemoveDeviceClient`). A crash of the app detaches it, so the devices are never visible without the app.
+`Mixanimo Mic` stays a loopback ring inside the driver: the app writes it and clients read it back through its input stream. The driver's clock is the host clock (`mach_absolute_time`).
+
+Both devices report `kAudioDevicePropertyIsHidden = true` until a client whose bundle ID is the Mixanimo app attaches (`AddDeviceClient`). The host attaches every process that holds a connection to CoreAudio, so the app's property listeners are enough and it needs no IO proc for this. They hide again when that client detaches (`RemoveDeviceClient`). A crash of the app detaches it, so the devices are never visible without the app.
 
 The plugin object exposes a custom property with the driver version so the app can detect a stale driver.
 
@@ -33,12 +35,12 @@ Runs in the app process.
 
 Output path:
 
-1. One IO callback on the `Mixanimo` device reads the mixed feed. Its buffer size is the smallest
-   enabled output's buffer size converted to the virtual rate, so a 32-frame wired output is not
-   held to the process default of about 512 frames.
+1. `SharedFeed` maps `/mixanimo-feed` read only once and checks the magic and the layout version. An object that is missing, or one this build cannot read, is reported as an outdated driver and no output starts. There is no IO callback on the `Mixanimo` device at all.
 2. Each enabled physical output has its own IO callback at its own buffer size (`kAudioDevicePropertyBufferFrameSize`, clamped to the device's reported range). Defaults: 256 frames for Bluetooth transport, 128 otherwise.
-3. Per output, in order: ring buffer from the feed, resampler from the virtual rate to the device's current nominal rate (the device's rate is never changed by Mixanimo), drift correction by nudging the resample ratio from the ring fill level, optional mic monitor summed in, ten-band EQ (biquads via Accelerate `vDSP_biquad`, RBJ coefficients, filter types matching Apple's EQ unit), delay line, per-output gain, master gain.
+3. Per output, in order: its own reading position in the shared ring, held the driver's last IO block plus two of its own pulls behind the driver's write position, resampler from the virtual rate to the device's current nominal rate (the device's rate is never changed by Mixanimo), drift correction by nudging the resample ratio from the distance to the write position, optional mic monitor summed in, ten-band EQ (biquads via Accelerate `vDSP_biquad`, RBJ coefficients, filter types matching Apple's EQ unit), delay line, per-output gain, master gain.
 4. Master gain mirrors the driver's volume control both ways.
+
+An output whose read position catches up with the driver's plays silence, freezes its drift correction and waits; when the write position moves again it takes a fresh position behind it. A changed generation, which is what a coreaudiod restart leaves behind, does the same. A header sample rate that no longer matches rebuilds the graph, as a virtual rate change already does.
 
 Input path:
 
@@ -51,7 +53,7 @@ Hot swap: the engine listens for `kAudioHardwarePropertyDevices`. A device whose
 
 Pinning: while running and with the toggle on, the engine listens for default output and default input changes and sets them back to the virtual devices.
 
-Sync: a global toggle. Off means every output delay is 0. On means each output delay is the largest reported output latency (`kAudioDevicePropertyLatency` + `kAudioDevicePropertySafetyOffset` + stream latency + buffer size + what its feed ring holds) among enabled outputs minus its own, plus a per-output manual trim in milliseconds.
+Sync: a global toggle. Off means every output delay is 0. On means each output delay is the largest reported output latency (`kAudioDevicePropertyLatency` + `kAudioDevicePropertySafetyOffset` + stream latency + buffer size + the target fill it holds in the shared ring) among enabled outputs minus its own, plus a per-output manual trim in milliseconds.
 
 Lifecycle: on launch, remember the current default output and input, then pin to the virtual devices. On quit, restore them. On launch after a crash, the same logic applies because the driver already hid the devices when the app died.
 

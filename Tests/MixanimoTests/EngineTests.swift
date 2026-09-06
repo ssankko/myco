@@ -31,23 +31,29 @@ final class EngineTests: XCTestCase {
         return settings
     }
 
-    /// The feed reads the virtual device even with nothing enabled, which is the one path every
-    /// output hangs off.
-    func testFeedReadsTheVirtualDevice() throws {
+    /// The driver's ring is what every output hangs off, and the engine reaches it without an IO
+    /// proc of its own on the virtual device.
+    func testTheSharedRingCarriesWhatIsPlayedIntoTheVirtualDevice() throws {
         let virtual = try device(AppModel.outputDeviceUID)
-        let store = emptyStore()
         let model = AppModel(settings: settings(virtualRate: 48000))
-        let engine = Engine(model: model, managesDefaults: false, defaultsStore: store)
+        let engine = Engine(model: model, managesDefaults: false, defaultsStore: emptyStore())
         engine.start()
         defer { engine.stop() }
 
+        let feed = try SharedFeed.open()
+        defer { feed.unmap() }
+        XCTAssertEqual(feed.sampleRate, 48000, "the engine set the rate the header reports")
+
         let source = try SineSource(device: virtual, frequency: 1000, amplitude: 0.5)
         try source.start()
+        let first = feed.writeFrame
         Thread.sleep(forTimeInterval: 0.5)
+        let last = feed.writeFrame
         source.stop()
 
         XCTAssertTrue(model.outputStatus.isEmpty, "no output is enabled")
-        XCTAssertGreaterThan(engine.feedFrames, Int(48000 * 0.2), "frames the feed read")
+        XCTAssertGreaterThan(Int(last - first), Int(48000 * 0.2), "frames the driver wrote")
+        XCTAssertGreaterThan(feed.writeBlockFrames, 0, "the block the driver last took")
     }
 
     /// The whole output chain end to end: a tone written into `Mixanimo` at 88200 comes out of the
@@ -95,9 +101,9 @@ final class EngineTests: XCTestCase {
             -20, "the captured tone carries more than the source did")
     }
 
-    /// A 32-frame output is not held to the process default feed block: the feed shrinks to the one
-    /// output pull, the ring stays fed at that size, and the tone still comes out.
-    func testSmallOutputBufferShrinksTheFeed() throws {
+    /// A 32-frame output reads the shared ring at its own size without running dry, and the tone
+    /// still comes out.
+    func testSmallOutputBufferPlaysWithoutUnderruns() throws {
         let virtual = try device(AppModel.outputDeviceUID)
         let mic = try device(AppModel.micDeviceUID)
         try virtual.setVolumeScalar(1, scope: .output)
@@ -111,7 +117,6 @@ final class EngineTests: XCTestCase {
         defer { engine.stop() }
 
         XCTAssertEqual(Int(try mic.bufferFrameSize), 32, "the output runs at the size it was given")
-        XCTAssertEqual(engine.feedBlockFrames, 59, "32 output frames at 48000 are 59 at 88200")
 
         let capture = try Capture(device: mic, seconds: 1.5)
         let source = try SineSource(device: virtual, frequency: 1000, amplitude: 0.5)
@@ -130,11 +135,10 @@ final class EngineTests: XCTestCase {
         XCTAssertEqual(tone.frequency, 1000, accuracy: 2, "the resampled tone drifted off 1 kHz")
         XCTAssertEqual(decibels(tone.amplitude / 0.5), 0, accuracy: 1, "the tone's own level")
 
-        //  The ring the feed fills is most of what this output waits for, so the reported latency
-        //  has to carry it; 32 frames of buffer alone would be a fifth of a millisecond.
+        //  What the output holds in the shared ring is most of what it waits for, so the reported
+        //  latency has to carry it; 32 frames of buffer alone would be a fifth of a millisecond.
         let status = try XCTUnwrap(model.outputStatus[AppModel.micDeviceUID])
-        XCTAssertGreaterThan(status.latencyMilliseconds, 3, "the ring prime is missing from it")
-        XCTAssertLessThan(status.latencyMilliseconds, 12)
+        XCTAssertGreaterThan(status.latencyMilliseconds, 3, "the target fill is missing from it")
     }
 
     /// Sync publishes the alignment delay and the measured latency per output; the only output has
@@ -199,10 +203,10 @@ final class EngineTests: XCTestCase {
         guard let version = DriverInstaller.installedVersion() else {
             throw XCTSkip("the driver is not installed; run make install first")
         }
-        XCTAssertEqual(version, "0.2.0")
+        XCTAssertEqual(version, "0.3.0")
         //  The test host is not the app bundle, so nothing is bundled to compare against.
         XCTAssertEqual(DriverInstaller.bundledVersion, "")
-        XCTAssertEqual(DriverInstaller.status(), .ready(version: "0.2.0"))
+        XCTAssertEqual(DriverInstaller.status(), .ready(version: "0.3.0"))
     }
 
     /// A set left behind by a run that never restored is what the next run puts back, rather than

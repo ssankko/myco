@@ -93,7 +93,9 @@ final class Engine {
         }
         statusTask = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(for: .milliseconds(500))
+                // Level meters need a rate the eye reads as movement; with the popover closed
+                // nothing shows them and the counters alone are worth a poll.
+                try? await Task.sleep(for: .milliseconds(self?.model.isMetering == true ? 33 : 500))
                 self?.pollCounters()
             }
         }
@@ -115,6 +117,7 @@ final class Engine {
         feed = nil
         plan = Plan()
         model.outputStatus = [:]
+        model.inputStatus = [:]
         if managesDefaults { defaultDevices.restore() }
     }
 
@@ -299,6 +302,7 @@ final class Engine {
             uniqueKeysWithValues: outputs.map {
                 ($0.uid, OutputStatus(isActive: true, sampleRate: $0.sampleRate))
             })
+        model.inputStatus = Dictionary(uniqueKeysWithValues: inputs.map { ($0.uid, InputStatus()) })
     }
 
     /// Tears the graph down producer first, so nothing writes into a ring that is already gone.
@@ -350,13 +354,34 @@ final class Engine {
 
     /// Copies what the IO threads counted into the status the UI reads.
     func pollCounters() {
+        let metering = model.isMetering
         for node in outputs {
-            model.outputStatus[node.uid]?.underruns = node.underruns.value
+            var status = model.outputStatus[node.uid] ?? OutputStatus()
+            status.underruns = node.underruns.value
+            if metering {
+                status.peak = take(node.peak)
+                status.peakHold = heldPeak(status.peakHold, peak: status.peak)
+            }
+            model.outputStatus[node.uid] = status
             let frames = node.frames.value
             if frames > 0, playing.insert(node.uid).inserted {
                 log.info("output \(node.uid, privacy: .public) is playing, \(frames) frames read")
             }
         }
+        guard metering else { return }
+        for node in inputs {
+            var status = model.inputStatus[node.uid] ?? InputStatus()
+            status.peak = take(node.peak)
+            status.peakHold = heldPeak(status.peakHold, peak: status.peak)
+            model.inputStatus[node.uid] = status
+        }
+    }
+
+    /// Reads a peak slot and clears it, so the next poll reports the block it measures.
+    private func take(_ slot: AtomicFloat) -> Float {
+        let peak = slot.value
+        slot.value = 0
+        return peak
     }
 
     private func applyLaunchAtLogin() {

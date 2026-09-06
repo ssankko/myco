@@ -155,6 +155,9 @@ final class OutputNode {
     let underruns = AtomicCounter()
     /// Frames taken from the shared ring since the proc started.
     let frames = AtomicCounter()
+    /// The loudest sample this output played since the last poll. The IO thread raises it, the
+    /// poll clears it; a clear that lands between the two shows one poll of the older peak.
+    let peak = AtomicFloat()
 
     private let state: UnsafeMutablePointer<State>
     private let feedScratch: UnsafeMutablePointer<Float>
@@ -228,6 +231,7 @@ final class OutputNode {
         let tap = self.tap
         let underruns = self.underruns
         let frames = self.frames
+        let peak = self.peak
         let gainTarget = self.gainTarget
         let monitorGainTarget = self.monitorGainTarget
         let masterTarget = self.masterTarget
@@ -292,6 +296,7 @@ final class OutputNode {
             state.pointee.gain.apply(mix, frames: count, channels: 2)
             state.pointee.master.setTarget(linear: masterTarget.value)
             state.pointee.master.apply(mix, frames: count, channels: 2)
+            peak.value = max(peak.value, peakMagnitude(mix, count: count * 2))
             scatterStereo(mix, frames: count, into: output)
         }
     }
@@ -327,6 +332,7 @@ final class OutputNode {
         masterTarget.deallocate()
         underruns.deallocate()
         frames.deallocate()
+        peak.deallocate()
     }
 }
 
@@ -342,6 +348,8 @@ final class InputNode {
     let uid: String
     let device: AudioDevice
     let gainTarget = AtomicFloat(1)
+    /// The loudest sample this microphone put into the mix since the last poll.
+    let peak = AtomicFloat()
 
     private let destinations: UnsafeMutableBufferPointer<RingBuffer>
     private let mono: UnsafeMutablePointer<Float>
@@ -377,6 +385,7 @@ final class InputNode {
         nonisolated(unsafe) let resampled = self.resampled
         nonisolated(unsafe) let state = self.state
         let gainTarget = self.gainTarget
+        let peak = self.peak
 
         proc = try IOProc(device: device) { _, input, _, _, _ in
             guard let input else { return }
@@ -385,6 +394,7 @@ final class InputNode {
             mixToMono(input, frames: count, into: mono)
             state.pointee.gain.setTarget(linear: gainTarget.value)
             state.pointee.gain.apply(mono, frames: count, channels: 1)
+            peak.value = max(peak.value, peakMagnitude(mono, count: count))
             let produced = state.pointee.resampler
                 .process(input: mono, frames: count, output: resampled, capacity: outCapacity).produced
             for ring in destinationsCopy { ring.write(resampled, frames: produced) }
@@ -401,6 +411,7 @@ final class InputNode {
         mono.deallocate()
         resampled.deallocate()
         gainTarget.deallocate()
+        peak.deallocate()
     }
 }
 

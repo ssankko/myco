@@ -4,13 +4,25 @@ import SwiftUI
 @main
 @MainActor
 struct MixanimoApp: App {
-    @State private var model = AppModel()
-    @State private var actions = Actions()
+    @State private var model: AppModel
+    @State private var actions: Actions
+    @State private var engine: Engine
 
     init() {
         // Mixanimo lives in the menu bar, so it takes no Dock tile and no main menu.
         NSApplication.shared.setActivationPolicy(.accessory)
-        // Engine(model:) is attached here
+        let model = AppModel()
+        let actions = Actions()
+        let engine = Engine(model: model)
+        actions.install = { try? await engine.installDriver() }
+        actions.uninstall = { try? await engine.uninstallDriver() }
+        engine.start()
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification, object: nil, queue: .main
+        ) { _ in MainActor.assumeIsolated { engine.stop() } }
+        _model = State(initialValue: model)
+        _actions = State(initialValue: actions)
+        _engine = State(initialValue: engine)
     }
 
     var body: some Scene {

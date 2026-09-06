@@ -1,3 +1,4 @@
+import Accelerate
 import Foundation
 
 /// Variable-ratio windowed-sinc resampler for interleaved audio.
@@ -36,6 +37,14 @@ public struct Resampler: @unchecked Sendable {
     private let historyFrames: Int
     private let history: UnsafeMutablePointer<Float>
     private let position: UnsafeMutablePointer<Double>
+    /// Tap weights of the output frame being written, from the leftmost tap to the rightmost.
+    private let weights: UnsafeMutablePointer<Float>
+    /// Table positions the weights are read from, one per tap.
+    private let tablePositions: UnsafeMutablePointer<Float>
+    /// The history followed by the head of the current block, so a window that reaches before the
+    /// block start is still one contiguous run.
+    private let edge: UnsafeMutablePointer<Float>
+    private let edgeFrames: Int
 
     public init(channels: Int = 2, ratio: Double = 1, maxDownsampleFactor: Double = 2) {
         precondition(channels > 0, "channels must be positive")
@@ -66,12 +75,24 @@ public struct Resampler: @unchecked Sendable {
         history.initialize(repeating: 0, count: historyFrames * channels)
         position = .allocate(capacity: 1)
         position.initialize(to: 0)
+        weights = .allocate(capacity: 2 * tapsPerSide)
+        weights.initialize(repeating: 0, count: 2 * tapsPerSide)
+        tablePositions = .allocate(capacity: 2 * tapsPerSide)
+        tablePositions.initialize(repeating: 0, count: 2 * tapsPerSide)
+        // A window only reaches before the block while the read position is under `tapsPerSide`,
+        // so the head this holds never has to be longer than two windows.
+        edgeFrames = historyFrames + 2 * tapsPerSide
+        edge = .allocate(capacity: edgeFrames * channels)
+        edge.initialize(repeating: 0, count: edgeFrames * channels)
     }
 
     public func deallocate() {
         table.deallocate()
         history.deallocate()
         position.deallocate()
+        weights.deallocate()
+        tablePositions.deallocate()
+        edge.deallocate()
     }
 
     /// Drops the stored history and returns the read position to the start of the next block.
@@ -104,27 +125,36 @@ public struct Resampler: @unchecked Sendable {
         let scale = step > 1 ? Self.rolloff / step : 1.0
         let tableStep = scale * Double(Self.phases)
         let taps = min(tapsPerSide, Int((Double(Self.halfWidth) / scale).rounded(.up)))
+        let outputScale = Float(scale)
         var p = position.pointee
         var produced = 0
+
+        fillEdge(input, frames: frames)
 
         while produced < capacity {
             let base = Int(p.rounded(.down))
             guard base + taps <= frames - 1 else { break }
-            let fraction = p - Double(base)
+            makeWeights(fraction: p - Double(base), taps: taps, tableStep: tableStep)
 
-            for channel in 0..<channels {
-                var sum = 0.0
-                for offset in 0..<taps {
-                    let leftWeight = tap(at: (fraction + Double(offset)) * tableStep)
-                    if leftWeight != 0 {
-                        sum += Double(sample(input, index: base - offset, channel: channel)) * leftWeight
-                    }
-                    let rightWeight = tap(at: (1 - fraction + Double(offset)) * tableStep)
-                    if rightWeight != 0 {
-                        sum += Double(sample(input, index: base + 1 + offset, channel: channel)) * rightWeight
-                    }
+            // The window runs from frame `first` to `base + taps`. Below zero it comes from the
+            // edge buffer; a position that drifted before the stored history skips the taps the
+            // history no longer holds, which read as zero.
+            let first = base - taps + 1
+            let skip = first < 0 ? min(2 * taps, max(0, -(historyFrames + first))) : 0
+            if skip < 2 * taps {
+                let window = first >= 0
+                    ? input + first * channels
+                    : UnsafePointer(edge + (historyFrames + first + skip) * channels)
+                for channel in 0..<channels {
+                    var sum: Float = 0
+                    vDSP_dotpr(
+                        window + channel, vDSP_Stride(channels),
+                        weights + skip, 1,
+                        &sum, vDSP_Length(2 * taps - skip))
+                    output[produced * channels + channel] = sum * outputScale
                 }
-                output[produced * channels + channel] = Float(sum * scale)
+            } else {
+                output.advanced(by: produced * channels).update(repeating: 0, count: channels)
             }
 
             produced += 1
@@ -154,22 +184,33 @@ public struct Resampler: @unchecked Sendable {
         return process(input: source, frames: frames, output: destination, capacity: capacity)
     }
 
-    /// Reads the prototype at a table position, interpolating between neighbours.
+    /// Writes the tap weights of one output frame, leftmost tap first.
+    ///
+    /// The table positions of the taps on each side of the read position form two arithmetic
+    /// sequences, so the whole set is one pair of ramps and one interpolated table read. Clipping
+    /// them to the last usable entry gives the zero the table already holds past its own end.
     @inline(__always)
-    private func tap(at tablePosition: Double) -> Double {
-        let index = Int(tablePosition)
-        guard index >= 0, index < tableCount - 1 else { return 0 }
-        let fraction = tablePosition - Double(index)
-        let low = Double(table[index])
-        return low + fraction * (Double(table[index + 1]) - low)
+    private func makeWeights(fraction: Double, taps: Int, tableStep: Double) {
+        var left = Float((fraction + Double(taps - 1)) * tableStep)
+        var down = Float(-tableStep)
+        vDSP_vramp(&left, &down, tablePositions, 1, vDSP_Length(taps))
+        var right = Float((1 - fraction) * tableStep)
+        var up = Float(tableStep)
+        vDSP_vramp(&right, &up, tablePositions + taps, 1, vDSP_Length(taps))
+        var low: Float = 0
+        var high = Float(tableCount - 2)
+        vDSP_vclip(tablePositions, 1, &low, &high, tablePositions, 1, vDSP_Length(2 * taps))
+        vDSP_vlint(
+            table, tablePositions, 1, weights, 1, vDSP_Length(2 * taps), vDSP_Length(tableCount))
     }
 
-    /// Negative indices reach back into the stored tail of the previous block.
+    /// Lays the stored history and the head of the block end to end.
     @inline(__always)
-    private func sample(_ input: UnsafePointer<Float>, index: Int, channel: Int) -> Float {
-        if index >= 0 { return input[index * channels + channel] }
-        let slot = historyFrames + index
-        return slot >= 0 ? history[slot * channels + channel] : 0
+    private func fillEdge(_ input: UnsafePointer<Float>, frames: Int) {
+        edge.update(from: history, count: historyFrames * channels)
+        let head = min(frames, edgeFrames - historyFrames)
+        guard head > 0 else { return }
+        edge.advanced(by: historyFrames * channels).update(from: input, count: head * channels)
     }
 
     private func pushHistory(_ input: UnsafePointer<Float>, frames: Int) {

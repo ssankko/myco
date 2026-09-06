@@ -42,4 +42,13 @@ enum Readout {
     }
 
     static func octaves(_ value: Double) -> String { String(format: "%.2f oct", value) }
+
+    /// Short enough for a band chip: no unit, thousands as `k`, no trailing zero.
+    static func compactHertz(_ value: Double) -> String {
+        guard value >= 1000 else { return String(format: "%.0f", value) }
+        let thousands = value / 1000
+        return thousands == thousands.rounded()
+            ? String(format: "%.0fk", thousands)
+            : String(format: "%.1fk", thousands)
+    }
 }

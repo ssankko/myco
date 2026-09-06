@@ -5,17 +5,22 @@
 
 #include <CoreAudio/AudioServerPlugIn.h>
 #include <CoreAudio/AudioHardware.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <mach/mach_time.h>
 #include <math.h>
 #include <os/log.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <string.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #pragma mark - Configuration
 
 //  The one place the driver version lives; the app reads it through the 'mxvr' custom property.
-#define kDriverVersion  CFSTR("0.2.0")
+#define kDriverVersion  CFSTR("0.3.0")
 
 #define kBoxUID         CFSTR("com.mixanimo.box")
 #define kManufacturer   CFSTR("Mixanimo")
@@ -26,7 +31,6 @@ enum
 {
     kObjectID_Box               = 2,
     kObjectID_Device_Out        = 3,
-    kObjectID_Stream_Out_Input  = 4,
     kObjectID_Stream_Out_Output = 5,
     kObjectID_Volume_Out        = 6,
     kObjectID_Mute_Out          = 7,
@@ -42,6 +46,17 @@ enum
 //  buffers of 4096, the largest IO size the HAL asks for, at any supported rate.
 #define kRingFrames             65536u
 
+//  The `Mixanimo` ring lives in a POSIX shared memory object that the app maps read only, so every
+//  physical output reads the mix straight out of it and nothing has to capture an input stream.
+#define kFeedName               "/mixanimo-feed"
+#define kFeedMagic              0x4D584644u     /* 'MXFD' */
+#define kFeedLayoutVersion      1u
+#define kFeedChannels           2u
+//  Power of two for the same masking, and 131072 frames are 1.4 seconds at 96 kHz.
+#define kFeedRingFrames         (1u << 17)
+//  The header owns a whole page, so the float data starts page aligned.
+#define kFeedHeaderBytes        4096u
+
 //  Sample frames between successive zero time stamps; the host rejects a period below 10923.
 #define kZeroTimeStampPeriod    16384u
 
@@ -54,6 +69,29 @@ static const Float64    kRatesOut[] = { 44100.0, 48000.0, 88200.0, 96000.0, 1764
 static const Float64    kRatesMic[] = { 48000.0 };
 
 #pragma mark - State
+
+//  What the app finds at the start of the shared object. The two groups sit on their own 64-byte
+//  line: the first is written when the driver loads or the rate changes, the second on every IO
+//  cycle. mMagic is stored last, so a reader that sees it sees a whole header.
+typedef struct
+{
+    _Atomic UInt32  mMagic;
+    UInt32          mLayoutVersion;
+    UInt32          mChannels;
+    UInt32          mRingFrames;
+    Float64         mSampleRate;
+    //  A fresh value per Initialize, which is how a reader notices that coreaudiod restarted.
+    UInt64          mGeneration;
+    UInt8           mDescriptionPad[64 - 32];
+
+    //  Frames written since the device last started. The release store publishes the samples.
+    _Atomic UInt64  mWriteFrame;
+    //  Frames the last IO cycle carried, which tells a reader how far behind to sit.
+    _Atomic UInt32  mWriteBlockFrames;
+    UInt8           mWritePad[64 - 12];
+} FeedHeader;
+
+_Static_assert(sizeof(FeedHeader) <= kFeedHeaderBytes, "the feed header must fit its page");
 
 //  One device description shared by both devices. Fields above mSampleRate never change.
 //  Everything below it is written only under gStateMutex; the fields the IO thread reads are
@@ -72,6 +110,10 @@ typedef struct
     const Float64*              mRates;
     UInt32                      mRateCount;
     AudioObjectPropertyScope    mDefaultScope;
+    UInt32                      mRingFrames;
+    //  The shared object for the device that publishes its ring, NULL for the other one.
+    FeedHeader*                 mFeed;
+    //  Interleaved float ring of mRingFrames frames, NULL while the shared object is missing.
     Float32*                    mRing;
 
     Float64                     mSampleRate;
@@ -87,25 +129,25 @@ typedef struct
     _Atomic UInt64              mWriteEnd;
 } DeviceState;
 
-static Float32 gRingOut[kRingFrames * 2];
 static Float32 gRingMic[kRingFrames];
 
 static DeviceState gDevices[2] =
 {
     {
         .mDeviceID = kObjectID_Device_Out,
-        .mInputStreamID = kObjectID_Stream_Out_Input,
+        //  Output only: a client writes the mix and the app reads it out of the shared object.
+        .mInputStreamID = kAudioObjectUnknown,
         .mOutputStreamID = kObjectID_Stream_Out_Output,
         .mVolumeID = kObjectID_Volume_Out,
         .mMuteID = kObjectID_Mute_Out,
         .mUID = CFSTR("com.mixanimo.output"),
         .mModelUID = CFSTR("com.mixanimo.output.model"),
         .mName = CFSTR("Mixanimo"),
-        .mChannels = 2,
+        .mChannels = kFeedChannels,
         .mRates = kRatesOut,
         .mRateCount = 6,
         .mDefaultScope = kAudioObjectPropertyScopeOutput,
-        .mRing = gRingOut,
+        .mRingFrames = kFeedRingFrames,
         .mSampleRate = 88200.0,
         .mInputStreamActive = 1,
         .mOutputStreamActive = 1,
@@ -124,6 +166,7 @@ static DeviceState gDevices[2] =
         .mRates = kRatesMic,
         .mRateCount = 1,
         .mDefaultScope = kAudioObjectPropertyScopeInput,
+        .mRingFrames = kRingFrames,
         .mRing = gRingMic,
         .mSampleRate = 48000.0,
         .mInputStreamActive = 1,
@@ -148,6 +191,9 @@ static UInt32   gAppProcessCount = 0;
 
 static DeviceState* DeviceForObjectID(AudioObjectID inObjectID)
 {
+    //  kAudioObjectUnknown is what a device without an input stream carries in mInputStreamID.
+    if(inObjectID == kAudioObjectUnknown) return NULL;
+
     for(UInt32 theIndex = 0; theIndex < 2; ++theIndex)
     {
         DeviceState* theDevice = &gDevices[theIndex];
@@ -176,10 +222,13 @@ static void FillFormat(const DeviceState* inDevice, AudioStreamBasicDescription*
     outFormat->mReserved = 0;
 }
 
-//  Both devices carry one stream per direction, so a scoped query sees one and a global query two.
-static UInt32 StreamCountForScope(AudioObjectPropertyScope inScope)
+//  Every device carries an output stream; only the mic device carries an input stream as well.
+static UInt32 StreamCountForScope(const DeviceState* inDevice, AudioObjectPropertyScope inScope)
 {
-    return (inScope == kAudioObjectPropertyScopeGlobal) ? 2 : 1;
+    UInt32 theInputs = (inDevice->mInputStreamID != kAudioObjectUnknown) ? 1 : 0;
+    if(inScope == kAudioObjectPropertyScopeInput) return theInputs;
+    if(inScope == kAudioObjectPropertyScopeOutput) return 1;
+    return theInputs + 1;
 }
 
 //  A cube taper: the slider travels most of its length over the top 40 dB.
@@ -460,7 +509,11 @@ static OSStatus Device_GetProperty(const DeviceState* inDevice, const AudioObjec
             UInt32 theCount = 0;
             if(theWantsStreams)
             {
-                if(inAddress->mScope != kAudioObjectPropertyScopeOutput) theList[theCount++] = inDevice->mInputStreamID;
+                if((inAddress->mScope != kAudioObjectPropertyScopeOutput) &&
+                   (inDevice->mInputStreamID != kAudioObjectUnknown))
+                {
+                    theList[theCount++] = inDevice->mInputStreamID;
+                }
                 if(inAddress->mScope != kAudioObjectPropertyScopeInput) theList[theCount++] = inDevice->mOutputStreamID;
             }
             if(theWantsControls && theHasControls && (inAddress->mScope != kAudioObjectPropertyScopeInput))
@@ -473,11 +526,15 @@ static OSStatus Device_GetProperty(const DeviceState* inDevice, const AudioObjec
 
         case kAudioDevicePropertyStreams:
         {
-            AudioObjectID theList[] = { inDevice->mInputStreamID, inDevice->mOutputStreamID };
-            const AudioObjectID* theSource = theList;
-            if(inAddress->mScope == kAudioObjectPropertyScopeOutput) theSource = &theList[1];
-            return ReturnArray(theSource, sizeof(AudioObjectID), StreamCountForScope(inAddress->mScope),
-                               inDataSize, outDataSize, outData);
+            AudioObjectID theList[2];
+            UInt32 theCount = 0;
+            if((inAddress->mScope != kAudioObjectPropertyScopeOutput) &&
+               (inDevice->mInputStreamID != kAudioObjectUnknown))
+            {
+                theList[theCount++] = inDevice->mInputStreamID;
+            }
+            if(inAddress->mScope != kAudioObjectPropertyScopeInput) theList[theCount++] = inDevice->mOutputStreamID;
+            return ReturnArray(theList, sizeof(AudioObjectID), theCount, inDataSize, outDataSize, outData);
         }
 
         case kAudioObjectPropertyControlList:
@@ -527,7 +584,8 @@ static OSStatus Device_GetProperty(const DeviceState* inDevice, const AudioObjec
         //  The margin on the input side: the host places the input time that much further behind
         //  the output time, which keeps a loopback read behind the write that fills it.
         case kAudioDevicePropertySafetyOffset:
-            RETURN_SCALAR(UInt32, (inAddress->mScope == kAudioObjectPropertyScopeInput) ? kInputSafetyOffset : 0);
+            RETURN_SCALAR(UInt32, ((inAddress->mScope == kAudioObjectPropertyScopeInput) &&
+                                   (inDevice->mInputStreamID != kAudioObjectUnknown)) ? kInputSafetyOffset : 0);
 
         case kAudioDevicePropertyZeroTimeStampPeriod:
             RETURN_SCALAR(UInt32, kZeroTimeStampPeriod);
@@ -588,7 +646,7 @@ static OSStatus Device_GetProperty(const DeviceState* inDevice, const AudioObjec
 
         case kAudioDevicePropertyStreamConfiguration:
         {
-            UInt32 theStreams = StreamCountForScope(inAddress->mScope);
+            UInt32 theStreams = StreamCountForScope(inDevice, inAddress->mScope);
             UInt32 theSize = offsetof(AudioBufferList, mBuffers) + (theStreams * sizeof(AudioBuffer));
             if(outData != NULL)
             {
@@ -821,22 +879,38 @@ static OSStatus GetProperty(AudioObjectID inObjectID, const AudioObjectPropertyA
 
 //  Called from the IO thread only: no allocation, no lock, every index masked into the ring.
 
+//  Clears a span of the ring, wrapping at the end like every other access.
+static void RingZero(Float32* inRing, UInt32 inRingFrames, UInt32 inChannels, UInt64 inStart, UInt32 inFrames)
+{
+    if(inFrames == 0) return;
+    UInt32 theOffset = (UInt32)(inStart & (inRingFrames - 1));
+    UInt32 theHead = ((theOffset + inFrames) > inRingFrames) ? (inRingFrames - theOffset) : inFrames;
+    memset(inRing + ((size_t)theOffset * inChannels), 0, (size_t)theHead * inChannels * sizeof(Float32));
+    memset(inRing, 0, (size_t)(inFrames - theHead) * inChannels * sizeof(Float32));
+}
+
 //  Writers add into the ring so several client processes mix, except for the writer that opens a
 //  span, which overwrites it. Without that, a span nobody reads would keep growing across wraps.
+//  Nothing clears the ring behind a reader, so the writer that opens a span clears the gap the
+//  previous one left in front of it as well.
 static void RingWrite(DeviceState* inDevice, UInt64 inStart, UInt32 inFrames, const Float32* inSource)
 {
-    if((inSource == NULL) || (inFrames == 0) || (inFrames > kRingFrames)) return;
+    UInt32 theRingFrames = inDevice->mRingFrames;
+    if((inDevice->mRing == NULL) || (inSource == NULL) || (inFrames == 0) || (inFrames > theRingFrames)) return;
 
+    UInt32 theChannels = inDevice->mChannels;
     UInt64 thePreviousEnd = atomic_load_explicit(&inDevice->mWriteEnd, memory_order_relaxed);
     Boolean theOpensSpan = (inStart >= thePreviousEnd);
     if(theOpensSpan)
     {
+        UInt64 theGap = inStart - thePreviousEnd;
+        if(theGap > theRingFrames) theGap = theRingFrames;
+        RingZero(inDevice->mRing, theRingFrames, theChannels, inStart - theGap, (UInt32)theGap);
         atomic_store_explicit(&inDevice->mWriteEnd, inStart + inFrames, memory_order_relaxed);
     }
 
-    UInt32 theChannels = inDevice->mChannels;
-    UInt32 theOffset = (UInt32)(inStart & (kRingFrames - 1));
-    UInt32 theHead = ((theOffset + inFrames) > kRingFrames) ? (kRingFrames - theOffset) : inFrames;
+    UInt32 theOffset = (UInt32)(inStart & (theRingFrames - 1));
+    UInt32 theHead = ((theOffset + inFrames) > theRingFrames) ? (theRingFrames - theOffset) : inFrames;
     size_t theHeadSamples = (size_t)theHead * theChannels;
     size_t theTailSamples = (size_t)(inFrames - theHead) * theChannels;
     Float32* theRing = inDevice->mRing + ((size_t)theOffset * theChannels);
@@ -857,22 +931,34 @@ static void RingWrite(DeviceState* inDevice, UInt64 inStart, UInt32 inFrames, co
             inDevice->mRing[theSample] += inSource[theHeadSamples + theSample];
         }
     }
+
+    //  The release store is the whole handshake with a reader in another process: whoever acquires
+    //  this position sees every sample written above it.
+    FeedHeader* theFeed = inDevice->mFeed;
+    if(theFeed != NULL)
+    {
+        atomic_store_explicit(&theFeed->mWriteBlockFrames, inFrames, memory_order_relaxed);
+        atomic_store_explicit(&theFeed->mWriteFrame,
+                              atomic_load_explicit(&inDevice->mWriteEnd, memory_order_relaxed),
+                              memory_order_release);
+    }
 }
 
 //  Reading empties what it took, so silence follows a writer that stops.
 static void RingRead(DeviceState* inDevice, UInt64 inStart, UInt32 inFrames, Float32* outDestination)
 {
+    UInt32 theRingFrames = inDevice->mRingFrames;
     if((outDestination == NULL) || (inFrames == 0)) return;
 
     UInt32 theChannels = inDevice->mChannels;
-    if(inFrames > kRingFrames)
+    if((inDevice->mRing == NULL) || (inFrames > theRingFrames))
     {
         memset(outDestination, 0, (size_t)inFrames * theChannels * sizeof(Float32));
         return;
     }
 
-    UInt32 theOffset = (UInt32)(inStart & (kRingFrames - 1));
-    UInt32 theHead = ((theOffset + inFrames) > kRingFrames) ? (kRingFrames - theOffset) : inFrames;
+    UInt32 theOffset = (UInt32)(inStart & (theRingFrames - 1));
+    UInt32 theHead = ((theOffset + inFrames) > theRingFrames) ? (theRingFrames - theOffset) : inFrames;
     size_t theHeadBytes = (size_t)theHead * theChannels * sizeof(Float32);
     size_t theTailBytes = (size_t)(inFrames - theHead) * theChannels * sizeof(Float32);
     Float32* theRing = inDevice->mRing + ((size_t)theOffset * theChannels);
@@ -884,6 +970,78 @@ static void RingRead(DeviceState* inDevice, UInt64 inStart, UInt32 inFrames, Flo
         memcpy(((UInt8*)outDestination) + theHeadBytes, inDevice->mRing, theTailBytes);
         memset(inDevice->mRing, 0, theTailBytes);
     }
+}
+
+//  Drops everything the ring holds. Called with IO stopped, never from the IO thread.
+static void RingReset(DeviceState* inDevice)
+{
+    atomic_store(&inDevice->mWriteEnd, 0);
+    if(inDevice->mRing != NULL)
+    {
+        memset(inDevice->mRing, 0, (size_t)inDevice->mRingFrames * inDevice->mChannels * sizeof(Float32));
+    }
+    if(inDevice->mFeed != NULL)
+    {
+        atomic_store_explicit(&inDevice->mFeed->mWriteFrame, 0, memory_order_release);
+    }
+}
+
+#pragma mark - Shared feed
+
+//  Maps the shared object and hands the output device its ring. The object outlives the driver, so
+//  a coreaudiod restart maps the one the app already holds and only the generation tells it apart.
+//  Mode 0644 leaves the driver as the only writer; a world-writable object could be unlinked by
+//  anyone. Failure leaves the device without a ring, which the app reports as a missing driver.
+static void FeedCreate(DeviceState* inDevice)
+{
+    size_t theBytes = kFeedHeaderBytes + ((size_t)kFeedRingFrames * kFeedChannels * sizeof(Float32));
+
+    int theFile = shm_open(kFeedName, O_CREAT | O_RDWR, 0644);
+    struct stat theInfo;
+    if((theFile >= 0) && (fstat(theFile, &theInfo) == 0) && ((size_t)theInfo.st_size < theBytes) &&
+       (ftruncate(theFile, (off_t)theBytes) != 0))
+    {
+        //  An object can only be sized once, so one left over at another size is replaced.
+        close(theFile);
+        shm_unlink(kFeedName);
+        theFile = shm_open(kFeedName, O_CREAT | O_EXCL | O_RDWR, 0644);
+        if((theFile >= 0) && (ftruncate(theFile, (off_t)theBytes) != 0)) { close(theFile); theFile = -1; }
+    }
+    if(theFile < 0)
+    {
+        os_log_error(OS_LOG_DEFAULT, "Mixanimo: cannot open %{public}s, errno %d", kFeedName, errno);
+        return;
+    }
+    fchmod(theFile, 0644);
+
+    void* theMap = mmap(NULL, theBytes, PROT_READ | PROT_WRITE, MAP_SHARED, theFile, 0);
+    close(theFile);
+    if(theMap == MAP_FAILED)
+    {
+        os_log_error(OS_LOG_DEFAULT, "Mixanimo: cannot map %{public}s, errno %d", kFeedName, errno);
+        return;
+    }
+    //  The IO thread must never take a fault on the ring.
+    if(mlock(theMap, theBytes) != 0)
+    {
+        os_log_error(OS_LOG_DEFAULT, "Mixanimo: cannot lock %{public}s, errno %d", kFeedName, errno);
+    }
+
+    FeedHeader* theFeed = (FeedHeader*)theMap;
+    inDevice->mFeed = theFeed;
+    inDevice->mRing = (Float32*)(((UInt8*)theMap) + kFeedHeaderBytes);
+    RingReset(inDevice);
+
+    theFeed->mLayoutVersion = kFeedLayoutVersion;
+    theFeed->mChannels = kFeedChannels;
+    theFeed->mRingFrames = kFeedRingFrames;
+    theFeed->mSampleRate = inDevice->mSampleRate;
+    theFeed->mGeneration = mach_absolute_time();
+    atomic_store_explicit(&theFeed->mWriteBlockFrames, 0, memory_order_relaxed);
+    atomic_store_explicit(&theFeed->mMagic, kFeedMagic, memory_order_release);
+
+    os_log(OS_LOG_DEFAULT, "Mixanimo: feed %{public}s ready, %zu bytes, generation %llu",
+           kFeedName, theBytes, theFeed->mGeneration);
 }
 
 #pragma mark - Hidden state
@@ -953,6 +1111,7 @@ static OSStatus Mixanimo_Initialize(AudioServerPlugInDriverRef inDriver, AudioSe
         atomic_store(&gDevices[theIndex].mHostTicksPerPeriod,
                      (gHostTicksPerSecond / gDevices[theIndex].mSampleRate) * (Float64)kZeroTimeStampPeriod);
     }
+    FeedCreate(&gDevices[0]);
     pthread_mutex_unlock(&gStateMutex);
 
     os_log(OS_LOG_DEFAULT, "Mixanimo: driver initialised, version %@", kDriverVersion);
@@ -1039,8 +1198,8 @@ static OSStatus Mixanimo_PerformDeviceConfigurationChange(AudioServerPlugInDrive
                  (gHostTicksPerSecond / theDevice->mSampleRate) * (Float64)kZeroTimeStampPeriod);
     atomic_store(&theDevice->mAnchorHostTime, mach_absolute_time());
     atomic_store(&theDevice->mTimeStampCount, 0);
-    atomic_store(&theDevice->mWriteEnd, 0);
-    memset(theDevice->mRing, 0, (size_t)kRingFrames * theDevice->mChannels * sizeof(Float32));
+    if(theDevice->mFeed != NULL) theDevice->mFeed->mSampleRate = theDevice->mSampleRate;
+    RingReset(theDevice);
     pthread_mutex_unlock(&gStateMutex);
 
     os_log(OS_LOG_DEFAULT, "Mixanimo: device %u now at %llu Hz", (unsigned)inDeviceObjectID, inChangeAction);
@@ -1317,8 +1476,7 @@ static OSStatus Mixanimo_StartIO(AudioServerPlugInDriverRef inDriver, AudioObjec
     {
         atomic_store(&theDevice->mAnchorHostTime, mach_absolute_time());
         atomic_store(&theDevice->mTimeStampCount, 0);
-        atomic_store(&theDevice->mWriteEnd, 0);
-        memset(theDevice->mRing, 0, (size_t)kRingFrames * theDevice->mChannels * sizeof(Float32));
+        RingReset(theDevice);
     }
     ++theDevice->mIOCount;
     pthread_mutex_unlock(&gStateMutex);
@@ -1372,7 +1530,8 @@ static OSStatus Mixanimo_WillDoIOOperation(AudioServerPlugInDriverRef inDriver, 
     if((theDevice == NULL) || (inDeviceObjectID != theDevice->mDeviceID)) return kAudioHardwareBadObjectError;
 
     *outWillDo = (inOperationID == kAudioServerPlugInIOOperationWriteMix) ||
-                 (inOperationID == kAudioServerPlugInIOOperationReadInput);
+                 ((inOperationID == kAudioServerPlugInIOOperationReadInput) &&
+                  (theDevice->mInputStreamID != kAudioObjectUnknown));
     *outWillDoInPlace = true;
     return 0;
 }
@@ -1387,8 +1546,9 @@ static OSStatus Mixanimo_BeginIOOperation(AudioServerPlugInDriverRef inDriver, A
 }
 
 //  Realtime path. It reads only immutable fields of the device and its atomics, so nothing here
-//  allocates, locks or waits. The host places the input time behind the output time by a whole IO
-//  buffer plus the safety offsets this device reports, which is what keeps a read behind its write.
+//  allocates, locks or waits. On `Mixanimo` a write ends in a release store the app acquires out of
+//  the shared object; on `Mixanimo Mic` the host places the input time behind the output time by a
+//  whole IO buffer plus the safety offset, which is what keeps a read behind its write.
 static OSStatus Mixanimo_DoIOOperation(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID,
                                        AudioObjectID inStreamObjectID, UInt32 inClientID, UInt32 inOperationID,
                                        UInt32 inIOBufferFrameSize, const AudioServerPlugInIOCycleInfo* inIOCycleInfo,

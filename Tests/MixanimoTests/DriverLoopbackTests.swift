@@ -1,11 +1,14 @@
-//  Plays a tone into each virtual device and checks that the same tone comes back.
+//  Plays a tone into each virtual device and checks that the same tone comes back: through the
+//  shared object for `Mixanimo`, through the input stream for `Mixanimo Mic`.
 //  The tests skip when the driver is not installed in /Library/Audio/Plug-Ins/HAL.
 //
-//  Reading any input device needs microphone permission, and the process that owns the terminal
+//  Reading an input device needs microphone permission, and the process that owns the terminal
 //  grants it. Run these from Terminal.app; a terminal without that permission captures silence.
 
 import CoreAudio
 import XCTest
+
+@testable import Mixanimo
 
 final class DriverLoopbackTests: XCTestCase {
 
@@ -54,6 +57,72 @@ final class DriverLoopbackTests: XCTestCase {
     }
 
     // MARK: - Loopback
+
+    /// Plays a 1 kHz sine into the device for `seconds` and answers the root mean square of what
+    /// was written and of what the driver's shared ring holds afterwards.
+    private func feedLoopback(deviceID: AudioObjectID, seconds: Double) throws -> (written: Double, captured: Double) {
+        let feed = try SharedFeed.open()
+        defer { feed.unmap() }
+        let rate = try sampleRate(of: deviceID)
+        XCTAssertEqual(feed.sampleRate, rate, "the header carries the device's rate")
+
+        let phase = UnsafeMutablePointer<Double>.allocate(capacity: 1)
+        let writtenSum = UnsafeMutablePointer<Double>.allocate(capacity: 1)
+        let writtenCount = UnsafeMutablePointer<Int>.allocate(capacity: 1)
+        phase.pointee = 0
+        writtenSum.pointee = 0
+        writtenCount.pointee = 0
+        defer {
+            phase.deallocate()
+            writtenSum.deallocate()
+            writtenCount.deallocate()
+        }
+        let step = 2.0 * Double.pi * 1000.0 / rate
+
+        var writer: AudioDeviceIOProcID?
+        let writerStatus = AudioDeviceCreateIOProcIDWithBlock(&writer, deviceID, nil) { _, _, _, outData, _ in
+            for buffer in UnsafeMutableAudioBufferListPointer(outData) {
+                let channels = Int(buffer.mNumberChannels)
+                guard channels > 0, let samples = buffer.mData?.assumingMemoryBound(to: Float.self) else { continue }
+                let frames = Int(buffer.mDataByteSize) / (channels * MemoryLayout<Float>.size)
+                for frame in 0..<frames {
+                    let value = Float(0.5 * sin(phase.pointee))
+                    phase.pointee += step
+                    if phase.pointee > 2.0 * Double.pi { phase.pointee -= 2.0 * Double.pi }
+                    for channel in 0..<channels {
+                        samples[frame * channels + channel] = value
+                    }
+                    writtenSum.pointee += Double(value) * Double(value)
+                    writtenCount.pointee += 1
+                }
+            }
+        }
+        XCTAssertEqual(writerStatus, noErr, "create writer IOProc")
+
+        XCTAssertEqual(AudioDeviceStart(deviceID, writer), noErr, "start writer")
+        //  The first tenth of a second covers the cycles before the writer has filled the ring.
+        Thread.sleep(forTimeInterval: 0.1)
+        let first = feed.writeFrame
+        Thread.sleep(forTimeInterval: seconds)
+        let last = feed.writeFrame
+        AudioDeviceStop(deviceID, writer)
+        AudioDeviceDestroyIOProcID(deviceID, writer!)
+
+        let counted = Int(last - first)
+        XCTAssertGreaterThan(counted, Int(rate * 0.2), "frames the driver wrote")
+        XCTAssertLessThanOrEqual(counted, feed.ringFrames, "the ring wrapped before it was read")
+
+        var block = [Float](repeating: 0, count: counted * 2)
+        block.withUnsafeMutableBufferPointer { feed.read(from: first, into: $0.baseAddress!, frames: counted) }
+        var capturedSum = 0.0
+        for index in 0..<counted {
+            capturedSum += Double(block[index * 2]) * Double(block[index * 2])
+        }
+
+        XCTAssertGreaterThan(writtenCount.pointee, 0, "written frames")
+        return (written: (writtenSum.pointee / Double(writtenCount.pointee)).squareRoot(),
+                captured: (capturedSum / Double(counted)).squareRoot())
+    }
 
     /// Writes a 1 kHz sine through one IOProc, captures the input side through another, and
     /// answers the root mean square of each side.
@@ -140,31 +209,32 @@ final class DriverLoopbackTests: XCTestCase {
                 captured: (capturedSum / Double(counted)).squareRoot())
     }
 
-    private func assertLoopback(uid: String) throws {
-        guard let deviceID = device(uid: uid) else {
-            throw XCTSkip("\(uid) is absent; run make install first")
-        }
-        let levels = try loopback(deviceID: deviceID, seconds: 0.5)
+    private func assertLevels(_ levels: (written: Double, captured: Double)) {
         XCTAssertGreaterThan(levels.captured, 0.001, "captured signal is silent")
         let difference = 20.0 * log10(levels.captured / levels.written)
         XCTAssertLessThan(abs(difference), 3.0,
                           "captured \(levels.captured) against written \(levels.written), \(difference) dB apart")
     }
 
+    private func deviceOrSkip(_ uid: String) throws -> AudioObjectID {
+        guard let deviceID = device(uid: uid) else {
+            throw XCTSkip("\(uid) is absent; run make install first")
+        }
+        return deviceID
+    }
+
     // MARK: - Tests
 
-    func testOutputDeviceLoopsBack() throws {
-        try assertLoopback(uid: Self.outputUID)
+    func testOutputDeviceReachesTheSharedFeed() throws {
+        assertLevels(try feedLoopback(deviceID: try deviceOrSkip(Self.outputUID), seconds: 0.5))
     }
 
     func testMicDeviceLoopsBack() throws {
-        try assertLoopback(uid: Self.micUID)
+        assertLevels(try loopback(deviceID: try deviceOrSkip(Self.micUID), seconds: 0.5))
     }
 
     func testDeviceStaysHiddenForOtherProcesses() throws {
-        guard let deviceID = device(uid: Self.outputUID) else {
-            throw XCTSkip("\(Self.outputUID) is absent; run make install first")
-        }
+        let deviceID = try deviceOrSkip(Self.outputUID)
 
         var proc: AudioDeviceIOProcID?
         XCTAssertEqual(AudioDeviceCreateIOProcIDWithBlock(&proc, deviceID, nil) { _, _, _, _, _ in }, noErr)

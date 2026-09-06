@@ -12,16 +12,6 @@ struct OutputStatus: Equatable, Sendable {
     var delayMilliseconds: Double = 0
     var sampleRate: Double = 0
     var underruns = 0
-    /// The loudest sample of the last poll, 0 to 1, and the mark that falls back behind it.
-    var peak: Float = 0
-    var peakHold: Float = 0
-}
-
-/// Live facts about one microphone in the mix.
-struct InputStatus: Equatable, Sendable {
-    /// The loudest sample of the last poll, 0 to 1, and the mark that falls back behind it.
-    var peak: Float = 0
-    var peakHold: Float = 0
 }
 
 enum DriverStatus: Equatable, Sendable {
@@ -54,11 +44,7 @@ final class AppModel {
     var masterMuted = false
 
     var outputStatus: [String: OutputStatus] = [:]
-    var inputStatus: [String: InputStatus] = [:]
     var driver: DriverStatus = .unknown
-
-    /// True while the popover shows the level meters. The engine measures levels only then.
-    var isMetering = false
 
     init(settings: Settings = .load()) {
         self.settings = settings

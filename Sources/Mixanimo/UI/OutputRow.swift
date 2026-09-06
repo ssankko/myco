@@ -59,8 +59,6 @@ struct OutputRow: View {
 
     @ViewBuilder
     private var chain: some View {
-        LevelMeter(peak: status.peak, hold: status.peakHold)
-
         HStack(spacing: 8) {
             MeterSlider(
                 label: "\(entry.name) volume", value: gain, range: -60...12, step: 0.5,

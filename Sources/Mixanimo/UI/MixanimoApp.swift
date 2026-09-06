@@ -23,7 +23,7 @@ struct MixanimoApp: App {
         _model = State(initialValue: model)
         _actions = State(initialValue: actions)
         _engine = State(initialValue: engine)
-        StatusItem.install(Popover(model: model, actions: actions), model: model)
+        StatusItem.install(Popover(model: model, actions: actions))
     }
 
     var body: some Scene {
@@ -49,19 +49,15 @@ final class StatusItem: NSObject {
     /// The status bar keeps no strong reference, so the app's one item lives here.
     private static var live: StatusItem?
 
-    static func install(_ content: some View, model: AppModel) {
-        live = StatusItem(content: content, model: model)
-    }
+    static func install(_ content: some View) { live = StatusItem(content: content) }
 
-    private let model: AppModel
     private let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
     private let popover = NSPopover()
     /// Watches for clicks in other apps while the popover is open.
     private var outsideClicks: Any?
     private var becameActive: (any NSObjectProtocol)?
 
-    private init(content: some View, model: AppModel) {
-        self.model = model
+    private init(content: some View) {
         super.init()
         let host = NSHostingController(rootView: content)
         host.sizingOptions = [.preferredContentSize]
@@ -98,7 +94,6 @@ final class StatusItem: NSObject {
         ) { [weak self] _ in
             MainActor.assumeIsolated { self?.popover.contentViewController?.view.window?.makeKey() }
         }
-        model.isMetering = true
         // A transient popover closes on a click in its own app, so only a global monitor, which
         // sees the clicks that land in other apps, covers the rest of the screen.
         outsideClicks = NSEvent.addGlobalMonitorForEvents(
@@ -111,7 +106,6 @@ final class StatusItem: NSObject {
 
 extension StatusItem: NSPopoverDelegate {
     func popoverDidClose(_ notification: Notification) {
-        model.isMetering = false
         if let outsideClicks { NSEvent.removeMonitor(outsideClicks) }
         outsideClicks = nil
         if let becameActive { NotificationCenter.default.removeObserver(becameActive) }

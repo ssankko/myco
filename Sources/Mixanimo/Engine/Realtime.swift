@@ -40,22 +40,6 @@ struct AtomicCounter: @unchecked Sendable {
     }
 }
 
-/// The loudest sample in a block, which is what a level meter reads. Audio thread safe: vDSP
-/// scans in place and allocates nothing.
-@inline(__always)
-public func peakMagnitude(_ samples: UnsafePointer<Float>, count: Int) -> Float {
-    guard count > 0 else { return 0 }
-    var peak: Float = 0
-    vDSP_maxmgv(samples, 1, &peak, vDSP_Length(count))
-    return peak
-}
-
-/// Where a meter's peak mark sits after one poll: it jumps to a new peak and otherwise falls by
-/// `fallPerPoll` of full scale, so a transient stays readable after it passes.
-public func heldPeak(_ hold: Float, peak: Float, fallPerPoll: Float = 0.02) -> Float {
-    max(0, max(peak, hold - fallPerPoll))
-}
-
 /// Frames one IO cycle carries, taken from the first buffer of the list.
 @inline(__always)
 func bufferListFrames(_ list: UnsafeMutableAudioBufferListPointer) -> Int {

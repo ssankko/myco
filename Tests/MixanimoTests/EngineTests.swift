@@ -125,17 +125,11 @@ final class EngineTests: XCTestCase {
         Thread.sleep(forTimeInterval: 1.0)
         //  Counted while the source still plays: the last partial pull a source that stops leaves
         //  behind is one more underrun, and it says nothing about the second the output ran.
-        model.isMetering = true
         engine.pollCounters()
-        //  Read before the status task polls again, which clears the slot the meter reads.
-        let metered = try XCTUnwrap(model.outputStatus[AppModel.micDeviceUID])
-        model.isMetering = false
         source.stop()
         let recorded = capture.stop()
 
         XCTAssertEqual(model.outputStatus[AppModel.micDeviceUID]?.underruns, 0)
-        XCTAssertEqual(metered.peak, 0.5, accuracy: 0.05, "the meter reads the tone that played")
-        XCTAssertEqual(metered.peakHold, metered.peak, "the first poll puts the mark on the peak")
         //  The first half second covers the ring priming and the gain ramps.
         let range = 24000..<min(recorded.count, 48000)
         XCTAssertGreaterThan(range.count, 12000, "captured frames")

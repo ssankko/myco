@@ -133,37 +133,6 @@ extension AudioDevice.TransportType {
     }
 }
 
-/// The level a device carries: a bar to the peak of the last poll with the recent peak held ahead
-/// of it. Hidden from VoiceOver, which has no use for a bar that moves thirty times a second.
-struct LevelMeter: View {
-    let peak: Float
-    let hold: Float
-
-    var body: some View {
-        GeometryReader { proxy in
-            let width = proxy.size.width
-            ZStack(alignment: .leading) {
-                Capsule().fill(Theme.meterTrack)
-                Capsule().fill(Theme.signal).frame(width: width * fraction(peak))
-                Capsule()
-                    .fill(hold >= 0.99 ? Theme.stopped : Theme.signal)
-                    .frame(width: 2)
-                    .offset(x: max(0, width * fraction(hold) - 2))
-                    .opacity(hold > 0 ? 1 : 0)
-            }
-        }
-        .frame(height: Theme.meterHeight)
-        .accessibilityHidden(true)
-    }
-
-    /// A meter reads in decibels, so the quiet end of the scale still moves. The bar starts 48 dB
-    /// below full scale, which is where game audio stops being audible over a fan.
-    private func fraction(_ level: Float) -> CGFloat {
-        guard level > 0 else { return 0 }
-        return CGFloat(min(1, max(0, (linearToDecibels(level) + 48) / 48)))
-    }
-}
-
 /// Opens the part of a card the user sets once and leaves alone.
 struct MoreToggle: View {
     let label: String

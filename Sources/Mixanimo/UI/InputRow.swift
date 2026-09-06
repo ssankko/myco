@@ -8,7 +8,6 @@ struct InputRow: View {
     @State private var isHovered = false
 
     private var settings: InputSettings { model.input(entry.id) }
-    private var status: InputStatus { model.inputStatus[entry.id] ?? InputStatus() }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
@@ -31,7 +30,6 @@ struct InputRow: View {
                 TransportTag(transport: entry.device.transportType)
             }
             if settings.enabled {
-                LevelMeter(peak: status.peak, hold: status.peakHold)
                 HStack(spacing: 8) {
                     MeterSlider(
                         label: "\(entry.name) gain", value: gain, range: -60...24, step: 0.5,

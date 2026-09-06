@@ -374,6 +374,9 @@ final class Engine {
         let wanted = model.settings.launchAtLogin
         guard wanted != launchAtLoginApplied else { return }
         launchAtLoginApplied = wanted
+        // The service refuses an unregister it never registered, so a setting that already matches
+        // the login items is left alone rather than pushed again.
+        guard wanted != (SMAppService.mainApp.status == .enabled) else { return }
         do {
             if wanted {
                 try SMAppService.mainApp.register()

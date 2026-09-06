@@ -340,23 +340,34 @@ final class Engine {
             let trim = sync ? model.output(node.uid).syncTrimMilliseconds : 0
             let frames = max(0, aligned[index] + Int((trim / 1000 * node.sampleRate).rounded()))
             node.delay.setDelay(frames: frames)
-            model.outputStatus[node.uid, default: OutputStatus()].isActive = true
-            model.outputStatus[node.uid]?.sampleRate = node.sampleRate
-            model.outputStatus[node.uid]?.latencyMilliseconds = node.latency.seconds * 1000
-            model.outputStatus[node.uid]?.delayMilliseconds =
-                node.sampleRate > 0 ? Double(frames) / node.sampleRate * 1000 : 0
+            var status = model.outputStatus[node.uid] ?? OutputStatus()
+            status.isActive = true
+            status.sampleRate = node.sampleRate
+            status.latencyMilliseconds = node.latency.seconds * 1000
+            status.delayMilliseconds = node.sampleRate > 0 ? Double(frames) / node.sampleRate * 1000 : 0
+            write(status, for: node.uid)
         }
     }
 
     /// Copies what the IO threads counted into the status the UI reads.
     func pollCounters() {
         for node in outputs {
-            model.outputStatus[node.uid]?.underruns = node.underruns.value
+            if var status = model.outputStatus[node.uid] {
+                status.underruns = node.underruns.value
+                write(status, for: node.uid)
+            }
             let frames = node.frames.value
             if frames > 0, playing.insert(node.uid).inserted {
                 log.info("output \(node.uid, privacy: .public) is playing, \(frames) frames read")
             }
         }
+    }
+
+    /// Stores a status only when it changed, because writing the same value again still tells every
+    /// view that reads it to lay out anew.
+    private func write(_ status: OutputStatus, for uid: String) {
+        guard model.outputStatus[uid] != status else { return }
+        model.outputStatus[uid] = status
     }
 
     private func applyLaunchAtLogin() {

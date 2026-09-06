@@ -52,7 +52,7 @@ final class Engine {
     private var running = false
     private var plan = Plan()
     private var feed: SharedFeed?
-    private var outputs: [OutputNode] = []
+    private(set) var outputs: [OutputNode] = []
     private var inputs: [InputNode] = []
     private var micDrain: MicDrainNode?
     private var listeners: [AudioObjectPropertyListener] = []

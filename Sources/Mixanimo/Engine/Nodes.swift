@@ -243,47 +243,57 @@ final class OutputNode {
             let write = feed.writeFrame
             let writeBlock = feed.writeBlockFrames
             let target = FeedReader.targetFill(writeBlock: writeBlock, pull: pull)
-            guard
-                let step = state.pointee.reader.step(
-                    write: write, generation: feed.generation, target: target)
-            else {
-                // Nothing plays into the virtual device, or the reader caught up with it.
-                silence(output)
-                return
-            }
-            if step.resynced {
-                // The fill sweeps a whole driver block between two of its writes, so its average
-                // sits half a block below the level the reader starts at; aiming there leaves the
-                // ratio at rest.
-                state.pointee.drift.targetFillFrames = max(0, Double(target) - Double(writeBlock) / 2)
-                state.pointee.fill = state.pointee.drift.targetFillFrames
+            var playing = false
+            if let step = state.pointee.reader.step(
+                write: write, generation: feed.generation, target: target)
+            {
+                playing = true
+                if step.resynced {
+                    // The fill sweeps a whole driver block between two of its writes, so its
+                    // average sits half a block below the level the reader starts at; aiming there
+                    // leaves the ratio at rest.
+                    state.pointee.drift.targetFillFrames =
+                        max(0, Double(target) - Double(writeBlock) / 2)
+                    state.pointee.fill = state.pointee.drift.targetFillFrames
+                }
+
+                // The driver writes a block at a time, so the ratio follows the average fill; the
+                // instantaneous one would swing the pitch by the whole block every cycle.
+                state.pointee.fill += fillSmoothing * (Double(step.fill) - state.pointee.fill)
+                state.pointee.resampler.ratio =
+                    baseRatio * state.pointee.drift.ratioMultiplier(fillFrames: state.pointee.fill)
+                let need = min(state.pointee.resampler.inputFramesNeeded(forOutput: count), pull)
+                let taken = min(need, step.fill)
+                feed.read(from: state.pointee.reader.readFrame, into: feedScratch, frames: taken)
+                if taken < need {
+                    underruns.add(1)
+                    feedScratch.advanced(by: taken * 2)
+                        .update(repeating: 0, count: (need - taken) * 2)
+                }
+                state.pointee.reader.advance(taken)
+                frames.add(taken)
+                let produced = state.pointee.resampler
+                    .process(input: feedScratch, frames: need, output: mix, capacity: count).produced
+                if produced < count {
+                    mix.advanced(by: produced * 2)
+                        .update(repeating: 0, count: (count - produced) * 2)
+                }
+            } else {
+                // Nothing plays into the virtual device; the mic monitor still has to come through.
+                mix.update(repeating: 0, count: count * 2)
             }
 
-            // The driver writes a block at a time, so the ratio follows the average fill; the
-            // instantaneous one would swing the pitch by the whole block every cycle.
-            state.pointee.fill += fillSmoothing * (Double(step.fill) - state.pointee.fill)
-            state.pointee.resampler.ratio =
-                baseRatio * state.pointee.drift.ratioMultiplier(fillFrames: state.pointee.fill)
-            let need = min(state.pointee.resampler.inputFramesNeeded(forOutput: count), pull)
-            let taken = min(need, step.fill)
-            feed.read(from: state.pointee.reader.readFrame, into: feedScratch, frames: taken)
-            if taken < need {
-                underruns.add(1)
-                feedScratch.advanced(by: taken * 2).update(repeating: 0, count: (need - taken) * 2)
-            }
-            state.pointee.reader.advance(taken)
-            frames.add(taken)
-            let produced = state.pointee.resampler
-                .process(input: feedScratch, frames: need, output: mix, capacity: count).produced
-            if produced < count {
-                mix.advanced(by: produced * 2).update(repeating: 0, count: (count - produced) * 2)
-            }
-
+            // The tap is drained every cycle, so its rings never fill up while the music pauses.
             if let tap, tap.render(into: monitor, frames: count) {
+                playing = true
                 state.pointee.monitorGain.setTarget(linear: monitorGainTarget.value)
                 state.pointee.monitorGain.apply(monitor, frames: count, channels: 1)
                 vDSP_vadd(mix, 2, monitor, 1, mix, 2, vDSP_Length(count))
                 vDSP_vadd(mix + 1, 2, monitor, 1, mix + 1, 2, vDSP_Length(count))
+            }
+            guard playing else {
+                silence(output)
+                return
             }
 
             eq.process(mix, frames: count)

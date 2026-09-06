@@ -201,6 +201,31 @@ final class EngineTests: XCTestCase {
         XCTAssertGreaterThan(level, 0, "the mic mix reached the device as silence")
     }
 
+    /// The monitor is heard while nothing plays into the virtual device: the output proc drains
+    /// its tap every cycle, so the ring an input writes into stays near its priming level instead
+    /// of filling up.
+    func testMonitorRunsWhileTheVirtualDeviceIsIdle() throws {
+        _ = try device(AppModel.outputDeviceUID)
+        _ = try device(AppModel.micDeviceUID)
+        guard let source = try AudioDevice.all.first(where: { $0.transportType == .builtIn && $0.hasInput })
+        else { throw XCTSkip("this machine has no built-in microphone") }
+
+        var settings = settings(virtualRate: 48000)
+        settings.inputs[try source.uid] = InputSettings(enabled: true)
+        settings.outputs[AppModel.micDeviceUID] = OutputSettings(enabled: true, monitor: true)
+        let model = AppModel(settings: settings)
+        let engine = Engine(model: model, managesDefaults: false, defaultsStore: emptyStore())
+        engine.start()
+        defer { engine.stop() }
+
+        let rings = try XCTUnwrap(engine.outputs.first?.tap?.rings, "the output carries a tap")
+        XCTAssertEqual(rings.count, 1)
+        Thread.sleep(forTimeInterval: 1.0)
+        let ring = rings[0]
+        XCTAssertGreaterThan(ring.fillLevel, 0, "the input wrote nothing")
+        XCTAssertLessThan(ring.fillLevel, ring.capacityFrames / 2, "the output never drained the tap")
+    }
+
     func testInstalledDriverReportsItsVersion() throws {
         guard let version = DriverInstaller.installedVersion() else {
             throw XCTSkip("the driver is not installed; run make install first")

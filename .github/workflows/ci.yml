@@ -7,9 +7,10 @@ on:
 
 jobs:
   build:
-    runs-on: macos-15
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v5
+      - run: swift --version && xcrun --show-sdk-version
       - run: swift build --build-tests
       # The engine tests need the driver installed and a microphone, so only the DSP tests run here.
       - run: swift test --filter MycoDSPTests

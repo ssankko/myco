@@ -4,6 +4,10 @@ import SwiftUI
 /// The app's colour, spacing and number formatting, kept in one place so a row and the EQ window
 /// read as the same instrument.
 enum Theme {
+    /// The brand: pale mint on deep forest, as on the app icon.
+    static let brandMint = Color(red: 0xC5 / 255, green: 0xF4 / 255, blue: 0xD4 / 255)
+    static let brandForest = Color(red: 0x17 / 255, green: 0x3B / 255, blue: 0x30 / 255)
+
     /// Lit signal. Every control that carries audio borrows this colour.
     static let signal = dynamic(light: (0.24, 0.31, 0.80), dark: (0.51, 0.57, 1.00))
     /// Something works but needs attention: underruns, an old driver.

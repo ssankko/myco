@@ -25,13 +25,14 @@ cp "$BUILD/libMycoDriver.dylib" "$DRIVER/Contents/MacOS/MycoDriver"
 cp "$ROOT/Sources/MycoDriver/Info.plist" "$DRIVER/Contents/Info.plist"
 install_name_tool -id "@loader_path/MycoDriver" "$DRIVER/Contents/MacOS/MycoDriver"
 
-#  The app icon is the glyph from Myco.svg in lime on a dark rounded tile, rendered by Quick Look.
+#  The app icon is the glyph from Myco.svg in the brand mint on a deep forest tile (the colours
+#  Theme.swift carries), rendered by Quick Look.
 ICONSET="$(mktemp -d)/Myco.iconset"
 mkdir -p "$ICONSET"
 {
 	echo '<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 128 128">'
-	echo '<rect x="13" y="13" width="102" height="102" rx="24" fill="#252c29"/>'
-	echo '<g transform="translate(20.8 20.8) scale(0.9)" fill="#d6f5a9">'
+	echo '<rect x="13" y="13" width="102" height="102" rx="24" fill="#173B30"/>'
+	echo '<g transform="translate(20.8 20.8) scale(0.9)" fill="#C5F4D4">'
 	sed -e '/<svg/d' -e '/<title>/d' -e '/<\/svg>/d' "$ROOT/Sources/Myco/Myco.svg"
 	echo '</g></svg>'
 } > "$ICONSET/../Myco.svg"

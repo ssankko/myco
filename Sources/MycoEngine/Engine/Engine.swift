@@ -200,6 +200,10 @@ package final class Engine {
             await apply(settings, replan: true)
         case .defaultChanged:
             if managesDefaults, settings.pinDefaults { defaultDevices.pin() }
+        case .serviceRestarted:
+            // Every node, listener and event stream points at a dead coreaudiod. The restart runs
+            // in its own task because stopping cancels the one delivering this event.
+            Task { await stop(); await start() }
         }
     }
 

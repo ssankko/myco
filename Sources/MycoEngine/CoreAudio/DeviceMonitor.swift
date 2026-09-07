@@ -13,6 +13,8 @@ package final class DeviceMonitor {
         case defaultChanged(scope: AudioDevice.Scope, device: AudioDevice?)
         case aliveChanged(uid: String, isAlive: Bool)
         case sampleRateChanged(uid: String, rate: Double)
+        /// coreaudiod came back, so every object ID held before is dead.
+        case serviceRestarted
     }
 
     package private(set) var outputs: [AudioDevice] = []
@@ -34,6 +36,7 @@ package final class DeviceMonitor {
             (kAudioHardwarePropertyDevices, { [weak self] in self?.refreshDevices(emitEvents: true) }),
             (kAudioHardwarePropertyDefaultOutputDevice, { [weak self] in self?.refreshDefaults(emitEvents: true) }),
             (kAudioHardwarePropertyDefaultInputDevice, { [weak self] in self?.refreshDefaults(emitEvents: true) }),
+            (kAudioHardwarePropertyServiceRestarted, { [weak self] in self?.restarted() }),
         ].compactMap { selector, action in
             try? AudioObjectPropertyListener(.system, AudioObjectPropertyAddress(selector)) { _ in action() }
         }
@@ -56,6 +59,14 @@ package final class DeviceMonitor {
 
     private func emit(_ event: Event) {
         for continuation in continuations.values { continuation.yield(event) }
+    }
+
+    /// The lists are taken again for the new IDs; one event stands in for the arrivals and
+    /// departures, since a consumer has to start over anyway.
+    private func restarted() {
+        refreshDevices(emitEvents: false)
+        refreshDefaults(emitEvents: false)
+        emit(.serviceRestarted)
     }
 
     private func refreshDevices(emitEvents: Bool) {

@@ -257,6 +257,90 @@ final class EngineTests: XCTestCase {
         XCTAssertLessThan(ring.fillLevel, ring.capacityFrames / 2, "the output never drained the tap")
     }
 
+    /// A second output that comes on is built beside the first: the node that was playing keeps
+    /// its identity and its status, and only the new device is started.
+    func testEnablingASecondOutputLeavesTheFirstRunning() async throws {
+        _ = try device(AppModel.outputDeviceUID)
+        _ = try device(AppModel.micDeviceUID)
+        let second = try secondOutput()
+
+        var settings = settings(virtualRate: 48000)
+        settings.outputs[AppModel.micDeviceUID] = OutputSettings(enabled: true)
+        let model = AppModel(settings: settings)
+        let engine = Engine(model: model, managesDefaults: false, defaultsStore: emptyStore())
+        await engine.start()
+        addTeardownBlock { await engine.stop() }
+        let before = await nodes(engine)
+        XCTAssertEqual(before.count, 1)
+
+        model.updateOutput(try second.uid) { $0.enabled = true }
+        try await Task.sleep(for: .seconds(1))
+
+        let after = await nodes(engine)
+        XCTAssertEqual(after.count, 2, "the second device never started")
+        XCTAssertTrue(
+            after.first { $0.uid == AppModel.micDeviceUID }?.node === before[0].node,
+            "the playing output was built anew")
+        XCTAssertEqual(model.outputStatus[AppModel.micDeviceUID]?.isActive, true)
+        XCTAssertEqual(model.outputStatus[try second.uid]?.isActive, true)
+        XCTAssertFalse(model.isApplying)
+    }
+
+    /// A buffer size a device has to be restarted for replaces that one node and leaves every
+    /// other output where it is.
+    func testChangingOneBufferSizeReplacesOnlyThatOutput() async throws {
+        _ = try device(AppModel.outputDeviceUID)
+        _ = try device(AppModel.micDeviceUID)
+        let second = try secondOutput()
+        let secondUID = try second.uid
+
+        var settings = settings(virtualRate: 48000)
+        settings.outputs[AppModel.micDeviceUID] = OutputSettings(enabled: true)
+        settings.outputs[secondUID] = OutputSettings(enabled: true)
+        let model = AppModel(settings: settings)
+        let engine = Engine(model: model, managesDefaults: false, defaultsStore: emptyStore())
+        await engine.start()
+        addTeardownBlock { await engine.stop() }
+        let before = await nodes(engine)
+        XCTAssertEqual(before.count, 2)
+
+        model.updateOutput(AppModel.micDeviceUID) { $0.bufferFrames = 256 }
+        try await Task.sleep(for: .seconds(1))
+
+        let after = await nodes(engine)
+        XCTAssertEqual(after.count, 2)
+        XCTAssertFalse(
+            after.first { $0.uid == AppModel.micDeviceUID }?.node
+                === before.first { $0.uid == AppModel.micDeviceUID }?.node,
+            "the resized output kept its node")
+        XCTAssertTrue(
+            after.first { $0.uid == secondUID }?.node === before.first { $0.uid == secondUID }?.node,
+            "the untouched output was built anew")
+        XCTAssertEqual(model.outputStatus[secondUID]?.isActive, true)
+        XCTAssertEqual(model.outputStatus[AppModel.micDeviceUID]?.isActive, true)
+        XCTAssertFalse(model.isApplying)
+    }
+
+    /// Every output node the engine runs, keyed by UID. The caller holds the nodes, so one built
+    /// after a stop cannot land at the address of one that went and pass for it.
+    private func nodes(_ engine: Engine) async -> [(uid: String, node: OutputNode)] {
+        await EngineActor.run { engine.outputs.map { (uid: $0.uid, node: $0) } }
+    }
+
+    /// An alive output device that is none of Mixanimo's own, the built-in speakers last so a test
+    /// opens them only when the machine has nothing else.
+    private func secondOutput() throws -> AudioDevice {
+        let mine = [AppModel.outputDeviceUID, AppModel.micDeviceUID]
+        let candidates = try AudioDevice.all.filter {
+            $0.hasOutput && $0.isAlive && !mine.contains((try? $0.uid) ?? "")
+        }
+        guard
+            let device = candidates.first(where: { $0.transportType != .builtIn })
+                ?? candidates.first
+        else { throw XCTSkip("this machine has no second output device") }
+        return device
+    }
+
     func testInstalledDriverReportsItsVersion() throws {
         guard let version = DriverInstaller.installedVersion() else {
             throw XCTSkip("the driver is not installed; run make install first")

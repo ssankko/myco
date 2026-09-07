@@ -23,8 +23,9 @@ package actor EngineActor {
 /// tap reads.
 ///
 /// The engine takes a copy of `model.settings` whenever it changes and reconciles the graph against
-/// it. A change to the outputs rebuilds the whole graph; a change to the inputs rebuilds the inputs
-/// under the running outputs; gains, EQ bands and delays are pushed into the running DSP objects.
+/// it. Only the outputs whose plan entry changed are stopped and built again, and a change to the
+/// virtual rate replaces every one of them; a change to the inputs rebuilds the inputs under the
+/// running outputs; gains, EQ bands and delays are pushed into the running DSP objects.
 @EngineActor
 package final class Engine {
     /// Everything that decides the shape of the graph.
@@ -53,9 +54,12 @@ package final class Engine {
         /// The largest block any input writes into a monitor ring at once.
         var inputBlockFrames: Int { inputs.map(\.blockFrames).max() ?? 0 }
 
-        /// True when the outputs, and so everything hanging off them, must be built anew.
-        func rebuildsOutputs(from old: Plan) -> Bool {
-            virtualRate != old.virtualRate || outputs != old.outputs
+        /// The UIDs whose output node `old` already runs and this plan leaves untouched. A
+        /// different virtual rate keeps none of them, because every resampler is built against it.
+        func keptOutputs(from old: Plan) -> Set<String> {
+            guard virtualRate == old.virtualRate else { return [] }
+            let previous = Dictionary(uniqueKeysWithValues: old.outputs.map { ($0.uid, $0) })
+            return Set(outputs.filter { previous[$0.uid] == $0 }.map(\.uid))
         }
     }
 
@@ -149,7 +153,8 @@ package final class Engine {
         statusTask?.cancel()
         statusTask = nil
         listeners = []
-        await teardown()
+        await teardownInputs(fading: outputs)
+        stopOutputs(outputs)
         feed?.unmap()
         feed = nil
         plan = Plan()
@@ -210,11 +215,20 @@ package final class Engine {
             planInputs = inputs
             await applyVirtualRate()
             let next = makePlan()
-            if next.rebuildsOutputs(from: plan) {
+            let kept = next.keptOutputs(from: plan)
+            let stopping = outputs.filter { !kept.contains($0.uid) }
+            let running = Set(outputs.map(\.uid))
+            // A planned UID with no node is a device that is new or one whose node failed to build.
+            let building = next.outputs.contains { !running.contains($0.uid) }
+            if !stopping.isEmpty || building {
+                // The inputs point at the taps of the outputs that existed when they were built, so
+                // any change to the set of outputs takes them down and puts them back.
                 await rebuilding {
-                    await teardown()
+                    await teardownInputs(fading: stopping)
+                    stopOutputs(stopping)
                     plan = next
-                    build()
+                    buildOutputs()
+                    buildInputs()
                 }
             } else if next.inputs != plan.inputs {
                 await rebuilding {
@@ -222,6 +236,8 @@ package final class Engine {
                     plan = next
                     buildInputs()
                 }
+            } else {
+                plan = next
             }
         }
         pushParameters()
@@ -324,25 +340,40 @@ package final class Engine {
     private func output(_ uid: String) -> OutputSettings { settings.outputs[uid] ?? OutputSettings() }
     private func input(_ uid: String) -> InputSettings { settings.inputs[uid] ?? InputSettings() }
 
-    private func build() {
+    /// Starts a node for every planned output that has none, and leaves `outputs` in the plan's
+    /// order. A node that is already there is not touched.
+    private func buildOutputs() {
         guard let feed = openFeed() else { return }
-        for item in plan.outputs {
+        var nodes = Dictionary(uniqueKeysWithValues: outputs.map { ($0.uid, $0) })
+        var started: [OutputNode] = []
+        for item in plan.outputs where nodes[item.uid] == nil {
             do {
-                outputs.append(
-                    try OutputNode(
-                        uid: item.uid, device: AudioDevice(id: item.deviceID),
-                        settings: output(item.uid), virtualRate: plan.virtualRate, feed: feed))
+                let node = try OutputNode(
+                    uid: item.uid, device: AudioDevice(id: item.deviceID),
+                    settings: output(item.uid), virtualRate: plan.virtualRate, feed: feed)
+                nodes[item.uid] = node
+                started.append(node)
             } catch {
                 log.error("output \(item.uid, privacy: .public): \(String(describing: error), privacy: .public)")
             }
         }
         // Consumers first, so a producer never writes into a ring nobody drains.
-        for output in outputs { try? output.start() }
-        outputStatus = Dictionary(
-            uniqueKeysWithValues: outputs.map {
-                ($0.uid, OutputStatus(isActive: true, sampleRate: $0.sampleRate))
-            })
-        buildInputs()
+        for node in started { try? node.start() }
+        outputs = plan.outputs.compactMap { nodes[$0.uid] }
+        for node in started {
+            outputStatus[node.uid] = OutputStatus(isActive: true, sampleRate: node.sampleRate)
+        }
+    }
+
+    /// Stops the given nodes and drops everything the engine holds per UID for them.
+    private func stopOutputs(_ stopping: [OutputNode]) {
+        let uids = Set(stopping.map(\.uid))
+        guard !uids.isEmpty else { return }
+        for node in stopping { node.stop() }
+        outputs.removeAll { uids.contains($0.uid) }
+        outputStatus = outputStatus.filter { !uids.contains($0.key) }
+        pushedEQ = pushedEQ.filter { !uids.contains($0.key) }
+        playing.subtract(uids)
     }
 
     /// Points every output's monitor tap at the planned inputs and starts them, under outputs that
@@ -373,19 +404,10 @@ package final class Engine {
         for input in inputs { try? input.start() }
     }
 
-    /// Tears the graph down producer first, so nothing writes into a ring that is already gone.
-    private func teardown() async {
-        await fade(outputs: outputs, inputs: inputs)
-        stopInputs()
-        for output in outputs { output.stop() }
-        outputs = []
-        outputStatus = [:]
-        pushedEQ = [:]
-        playing = []
-    }
-
-    private func teardownInputs() async {
-        await fade(outputs: [], inputs: inputs)
+    /// Fades the inputs together with the outputs about to stop, then takes the inputs down and
+    /// empties every tap, so nothing writes into a ring that is about to go.
+    private func teardownInputs(fading stopping: [OutputNode] = []) async {
+        await fade(outputs: stopping, inputs: inputs)
         stopInputs()
         for output in outputs { output.tap.configure(inputs: 0, producerFrames: 0) }
     }

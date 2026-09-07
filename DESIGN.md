@@ -36,7 +36,7 @@ that only moves a parameter never raises it.
 
 The sample maths it calls, and the two atomic handoff types the IO threads read parameters through, live in `Sources/MixanimoDSP`. That target imports no CoreAudio and no UI, so its tests run on any machine with no device attached.
 
-A change to the outputs or the virtual rate rebuilds the whole graph. A change to the inputs, or to a monitor toggle, does not: every output carries a monitor tap with a fixed set of rings that the inputs are pointed at, and the monitor gain ramps between zero and the set level. Before any node stops, its gain ramps to zero and the engine waits for the ramp to play out; every new node starts silent and ramps in.
+Only the outputs whose device, sample rate or buffer size changed are stopped and built again, and a change to the virtual rate replaces every one of them, because each output's resampler is built against that rate. A change to the inputs, or to a monitor toggle, stops no output; the inputs are rebuilt under the running outputs, as they also are whenever the set of outputs changes, because every output carries a monitor tap with a fixed set of rings that the inputs are pointed at, and the monitor gain ramps between zero and the set level. Before any node stops, its gain ramps to zero and the engine waits for the ramp to play out; every new node starts silent and ramps in.
 
 Output path:
 

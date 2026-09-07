@@ -18,14 +18,19 @@ struct InputRow: View {
                     .tint(Theme.signal)
                     .labelsHidden()
                     .accessibilityLabel("Mix in \(entry.name)")
-                DeviceIcon(
-                    name: entry.name, transport: entry.device.transportType, isInput: true,
-                    isOn: settings.enabled)
-                Text(entry.name)
-                    .font(.system(size: 12, weight: .medium))
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .foregroundStyle(settings.enabled ? .primary : .secondary)
+                HStack(spacing: 6) {
+                    DeviceIcon(
+                        name: entry.name, transport: entry.device.transportType, isInput: true,
+                        isOn: settings.enabled)
+                    Text(entry.name)
+                        .font(.system(size: 12, weight: .medium))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .foregroundStyle(settings.enabled ? .primary : .secondary)
+                }
+                .contentShape(.rect)
+                .onTapGesture { model.updateInput(entry.id) { $0.enabled.toggle() } }
+                .accessibilityHidden(true)
                 Spacer(minLength: 6)
                 TransportTag(transport: entry.device.transportType)
             }
@@ -33,7 +38,8 @@ struct InputRow: View {
                 HStack(spacing: 8) {
                     MeterSlider(
                         label: "\(entry.name) gain", value: gain, range: -60...24, step: 0.5,
-                        readout: "\(Readout.decibels(settings.gainDB)) dB", readoutWidth: 58)
+                        readout: "\(Readout.decibels(settings.gainDB)) dB", readoutWidth: 58,
+                        reset: 0)
                     GlyphToggle(
                         label: "Mute \(entry.name)",
                         symbol: settings.muted ? "mic.slash" : "mic",

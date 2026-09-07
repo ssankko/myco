@@ -79,6 +79,9 @@ struct Popover: View {
                 .font(.system(size: 17, weight: .medium).monospacedDigit())
                 .foregroundStyle(model.masterMuted ? AnyShapeStyle(.tertiary) : AnyShapeStyle(.primary))
                 .frame(width: 32, alignment: .trailing)
+                .contentShape(.rect)
+                .onTapGesture(count: 2) { masterDraft = nil; model.setMaster(1) }
+                .help("Double-click to reset")
                 .accessibilityHidden(true)
         }
         .opacity(model.masterMuted ? 0.65 : 1)
@@ -121,6 +124,9 @@ struct Popover: View {
     private var footer: some View {
         VStack(alignment: .leading, spacing: 9) {
             HStack {
+                Text("Runs at")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.tertiary)
                 Picker("Virtual rate", selection: $model.settings.virtualRate) {
                     ForEach(Settings.availableRates, id: \.self) { rate in
                         Text(rateLabel(rate)).tag(rate)
@@ -129,6 +135,7 @@ struct Popover: View {
                 .labelsHidden()
                 .controlSize(.small)
                 .frame(width: 104)
+                .help("A change restarts every output.")
                 .accessibilityLabel("Rate of the Mixanimo output device")
                 Spacer()
                 Toggle("Align outputs", isOn: $model.settings.sync)
@@ -148,8 +155,9 @@ struct Popover: View {
                     Spacer(minLength: 8)
                     if model.driver.isReady {
                         Button("Remove driver") { actions.run(actions.uninstall) }
-                            .buttonStyle(.link)
+                            .buttonStyle(.borderless)
                             .font(.system(size: 11))
+                            .foregroundStyle(Theme.danger)
                             .disabled(actions.uninstall == nil || actions.isWorking)
                     }
                 }

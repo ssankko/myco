@@ -49,7 +49,7 @@ enum EQWindows {
         let host = NSHostingController(rootView: EQWindow(model: model, uid: uid))
         host.sizingOptions = [.preferredContentSize]
         let window = NSWindow(contentViewController: host)
-        window.title = "Equaliser"
+        window.title = (try? AudioDevice.find(uid: uid))??.name.nilIfEmpty ?? "Equaliser"
         window.styleMask = [.titled, .closable, .miniaturizable]
         window.isReleasedWhenClosed = false
         // Ordering the window front brings it to the current space rather than switching to

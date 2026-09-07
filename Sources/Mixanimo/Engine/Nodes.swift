@@ -423,7 +423,7 @@ final class OutputNode {
     }
 
     /// 256 frames for Bluetooth, which cannot keep up with less, and 128 for everything else.
-    static func defaultBufferFrames(_ transport: AudioDevice.TransportType) -> UInt32 {
+    nonisolated static func defaultBufferFrames(_ transport: AudioDevice.TransportType) -> UInt32 {
         transport == .bluetooth || transport == .bluetoothLE ? 256 : 128
     }
 

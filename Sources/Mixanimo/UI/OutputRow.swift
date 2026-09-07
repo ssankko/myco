@@ -119,7 +119,7 @@ struct OutputRow: View {
 
     private var bufferPicker: some View {
         Picker("Buffer", selection: binding(\.bufferFrames)) {
-            Text("Auto (\(autoBufferFrames))").tag(UInt32?.none)
+            Text("Auto (\(OutputNode.defaultBufferFrames(entry.device.transportType)))").tag(UInt32?.none)
             ForEach([32, 64, 128, 256, 512, 1024, 2048] as [UInt32], id: \.self) { frames in
                 Text("\(frames)").tag(UInt32?(frames))
             }
@@ -129,12 +129,6 @@ struct OutputRow: View {
         .frame(width: 96)
         .help("Frames the device plays per cycle. Less is faster and needs more of the machine.")
         .accessibilityLabel("Buffer size for \(entry.name), in frames")
-    }
-
-    /// What Auto lands on, the same rule the engine applies: Bluetooth needs more frames.
-    private var autoBufferFrames: UInt32 {
-        let transport = entry.device.transportType
-        return transport == .bluetooth || transport == .bluetoothLE ? 256 : 128
     }
 
     private var syncTrim: some View {

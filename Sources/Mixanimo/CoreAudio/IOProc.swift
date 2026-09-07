@@ -6,7 +6,6 @@ import Foundation
 /// The closure runs on the HAL's own realtime IO thread, not on any queue of ours. It must not
 /// allocate, lock, log or touch main-actor state; do only buffer arithmetic in it. `input` and
 /// `output` are nil when the device has no stream in that direction.
-@MainActor
 final class IOProc {
     typealias Callback = @Sendable (
         _ now: UnsafePointer<AudioTimeStamp>,

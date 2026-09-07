@@ -11,7 +11,7 @@ private let testSuite = "com.mixanimo.tests"
 
 @MainActor
 final class EngineTests: XCTestCase {
-    private func emptyStore() -> UserDefaults {
+    private nonisolated func emptyStore() -> UserDefaults {
         let store = UserDefaults(suiteName: testSuite)!
         store.removePersistentDomain(forName: testSuite)
         return store
@@ -33,12 +33,12 @@ final class EngineTests: XCTestCase {
 
     /// The driver's ring is what every output hangs off, and the engine reaches it without an IO
     /// proc of its own on the virtual device.
-    func testTheSharedRingCarriesWhatIsPlayedIntoTheVirtualDevice() throws {
+    func testTheSharedRingCarriesWhatIsPlayedIntoTheVirtualDevice() async throws {
         let virtual = try device(AppModel.outputDeviceUID)
         let model = AppModel(settings: settings(virtualRate: 48000))
         let engine = Engine(model: model, managesDefaults: false, defaultsStore: emptyStore())
-        engine.start()
-        defer { engine.stop() }
+        await engine.start()
+        addTeardownBlock { await engine.stop() }
 
         let feed = try SharedFeed.open()
         defer { feed.unmap() }
@@ -47,7 +47,7 @@ final class EngineTests: XCTestCase {
         let source = try SineSource(device: virtual, frequency: 1000, amplitude: 0.5)
         try source.start()
         let first = feed.writeFrame
-        Thread.sleep(forTimeInterval: 0.5)
+        try await Task.sleep(for: .seconds(0.5))
         let last = feed.writeFrame
         source.stop()
 
@@ -58,7 +58,7 @@ final class EngineTests: XCTestCase {
 
     /// The whole output chain end to end: a tone written into `Mixanimo` at 88200 comes out of the
     /// engine's output proc on `Mixanimo Mic` at 48000, at the level it went in.
-    func testEnabledOutputCarriesTheResampledFeed() throws {
+    func testEnabledOutputCarriesTheResampledFeed() async throws {
         let virtual = try device(AppModel.outputDeviceUID)
         let mic = try device(AppModel.micDeviceUID)
         try virtual.setVolumeScalar(1, scope: .output)
@@ -69,8 +69,8 @@ final class EngineTests: XCTestCase {
         let store = emptyStore()
         let model = AppModel(settings: settings)
         let engine = Engine(model: model, managesDefaults: false, defaultsStore: store)
-        engine.start()
-        defer { engine.stop() }
+        await engine.start()
+        addTeardownBlock { await engine.stop() }
         XCTAssertEqual(model.master, 1, "the driver's volume control")
         XCTAssertEqual(model.outputStatus[AppModel.micDeviceUID]?.isActive, true)
 
@@ -78,7 +78,7 @@ final class EngineTests: XCTestCase {
         let source = try SineSource(device: virtual, frequency: 1000, amplitude: 0.5)
         try capture.start()
         try source.start()
-        Thread.sleep(forTimeInterval: 1.0)
+        try await Task.sleep(for: .seconds(1.0))
         source.stop()
         let recorded = capture.stop()
 
@@ -103,7 +103,7 @@ final class EngineTests: XCTestCase {
 
     /// A 32-frame output reads the shared ring at its own size without running dry, and the tone
     /// still comes out.
-    func testSmallOutputBufferPlaysWithoutUnderruns() throws {
+    func testSmallOutputBufferPlaysWithoutUnderruns() async throws {
         let virtual = try device(AppModel.outputDeviceUID)
         let mic = try device(AppModel.micDeviceUID)
         try virtual.setVolumeScalar(1, scope: .output)
@@ -113,8 +113,8 @@ final class EngineTests: XCTestCase {
         settings.outputs[AppModel.micDeviceUID] = OutputSettings(enabled: true, bufferFrames: 32)
         let model = AppModel(settings: settings)
         let engine = Engine(model: model, managesDefaults: false, defaultsStore: emptyStore())
-        engine.start()
-        defer { engine.stop() }
+        await engine.start()
+        addTeardownBlock { await engine.stop() }
 
         XCTAssertEqual(Int(try mic.bufferFrameSize), 32, "the output runs at the size it was given")
 
@@ -122,10 +122,10 @@ final class EngineTests: XCTestCase {
         let source = try SineSource(device: virtual, frequency: 1000, amplitude: 0.5)
         try capture.start()
         try source.start()
-        Thread.sleep(forTimeInterval: 1.0)
+        try await Task.sleep(for: .seconds(1.0))
         //  Counted while the source still plays: the last partial pull a source that stops leaves
         //  behind is one more underrun, and it says nothing about the second the output ran.
-        engine.pollCounters()
+        await engine.pollCounters()
         source.stop()
         let recorded = capture.stop()
 
@@ -145,7 +145,7 @@ final class EngineTests: XCTestCase {
 
     /// Sync publishes the alignment delay and the measured latency per output; the only output has
     /// nothing to wait for, so its delay is its own trim.
-    func testSyncPublishesDelayAndLatency() throws {
+    func testSyncPublishesDelayAndLatency() async throws {
         _ = try device(AppModel.outputDeviceUID)
         _ = try device(AppModel.micDeviceUID)
 
@@ -155,9 +155,9 @@ final class EngineTests: XCTestCase {
         let store = emptyStore()
         let model = AppModel(settings: synced)
         let engine = Engine(model: model, managesDefaults: false, defaultsStore: store)
-        engine.start()
+        await engine.start()
         let status = try XCTUnwrap(model.outputStatus[AppModel.micDeviceUID])
-        engine.stop()
+        await engine.stop()
 
         XCTAssertTrue(status.isActive)
         XCTAssertEqual(status.sampleRate, 48000)
@@ -168,9 +168,9 @@ final class EngineTests: XCTestCase {
         free.sync = false
         let unsyncedModel = AppModel(settings: free)
         let unsynced = Engine(model: unsyncedModel, managesDefaults: false, defaultsStore: store)
-        unsynced.start()
+        await unsynced.start()
         let without = try XCTUnwrap(unsyncedModel.outputStatus[AppModel.micDeviceUID])
-        unsynced.stop()
+        await unsynced.stop()
 
         XCTAssertEqual(without.delayMilliseconds, 0, "sync off means no delay")
         XCTAssertEqual(without.latencyMilliseconds, status.latencyMilliseconds, accuracy: 0.001)
@@ -178,7 +178,7 @@ final class EngineTests: XCTestCase {
 
     /// The input path end to end: an enabled microphone reaches `Mixanimo Mic`, which is where
     /// other apps read the mix. Room noise is enough; the point is that the path carries audio.
-    func testEnabledInputReachesTheMicDevice() throws {
+    func testEnabledInputReachesTheMicDevice() async throws {
         _ = try device(AppModel.outputDeviceUID)
         let mic = try device(AppModel.micDeviceUID)
         guard let source = try AudioDevice.all.first(where: { $0.transportType == .builtIn && $0.hasInput })
@@ -188,12 +188,12 @@ final class EngineTests: XCTestCase {
         settings.inputs[try source.uid] = InputSettings(enabled: true)
         let model = AppModel(settings: settings)
         let engine = Engine(model: model, managesDefaults: false, defaultsStore: emptyStore())
-        engine.start()
-        defer { engine.stop() }
+        await engine.start()
+        addTeardownBlock { await engine.stop() }
 
         let capture = try Capture(device: mic, seconds: 1.5)
         try capture.start()
-        Thread.sleep(forTimeInterval: 1.0)
+        try await Task.sleep(for: .seconds(1.0))
         let recorded = capture.stop()
 
         XCTAssertGreaterThan(recorded.count, 24000, "captured frames")
@@ -204,7 +204,7 @@ final class EngineTests: XCTestCase {
     /// The monitor is heard while nothing plays into the virtual device: the output proc drains
     /// its tap every cycle, so the ring an input writes into stays near its priming level instead
     /// of filling up.
-    func testMonitorRunsWhileTheVirtualDeviceIsIdle() throws {
+    func testMonitorRunsWhileTheVirtualDeviceIsIdle() async throws {
         _ = try device(AppModel.outputDeviceUID)
         _ = try device(AppModel.micDeviceUID)
         guard let source = try AudioDevice.all.first(where: { $0.transportType == .builtIn && $0.hasInput })
@@ -215,14 +215,44 @@ final class EngineTests: XCTestCase {
         settings.outputs[AppModel.micDeviceUID] = OutputSettings(enabled: true, monitor: true)
         let model = AppModel(settings: settings)
         let engine = Engine(model: model, managesDefaults: false, defaultsStore: emptyStore())
-        engine.start()
-        defer { engine.stop() }
+        await engine.start()
+        addTeardownBlock { await engine.stop() }
 
-        let rings = try XCTUnwrap(engine.outputs.first?.tap?.rings, "the output carries a tap")
-        XCTAssertEqual(rings.count, 1)
-        Thread.sleep(forTimeInterval: 1.0)
+        let tapRings = await engine.outputs.first?.tapRings
+        let rings = try XCTUnwrap(tapRings, "the output carries a tap")
+        XCTAssertEqual(rings.count, MonitorTap.maxInputs)
+        try await Task.sleep(for: .seconds(1.0))
         let ring = rings[0]
         XCTAssertGreaterThan(ring.fillLevel, 0, "the input wrote nothing")
+        XCTAssertLessThan(ring.fillLevel, ring.capacityFrames / 2, "the output never drained the tap")
+    }
+
+    /// An input that comes on joins the running outputs instead of rebuilding them: the same
+    /// output node is still there afterwards, and its monitor tap is being written and drained.
+    func testEnablingAnInputLeavesTheOutputsRunning() async throws {
+        _ = try device(AppModel.outputDeviceUID)
+        _ = try device(AppModel.micDeviceUID)
+        guard let source = try AudioDevice.all.first(where: { $0.transportType == .builtIn && $0.hasInput })
+        else { throw XCTSkip("this machine has no built-in microphone") }
+
+        var settings = settings(virtualRate: 48000)
+        settings.outputs[AppModel.micDeviceUID] = OutputSettings(enabled: true, monitor: true)
+        let model = AppModel(settings: settings)
+        let engine = Engine(model: model, managesDefaults: false, defaultsStore: emptyStore())
+        await engine.start()
+        addTeardownBlock { await engine.stop() }
+        let before = await engine.outputs.map(ObjectIdentifier.init)
+        XCTAssertEqual(before.count, 1)
+
+        model.updateInput(try source.uid) { $0.enabled = true }
+        try await Task.sleep(for: .seconds(1))
+
+        let after = await engine.outputs.map(ObjectIdentifier.init)
+        XCTAssertEqual(after, before, "the output was built anew")
+        XCTAssertFalse(model.isApplying)
+        let tapRings = await engine.outputs.first?.tapRings
+        let ring = try XCTUnwrap(tapRings)[0]
+        XCTAssertGreaterThan(ring.fillLevel, 0, "the input never reached the running output")
         XCTAssertLessThan(ring.fillLevel, ring.capacityFrames / 2, "the output never drained the tap")
     }
 
@@ -238,8 +268,16 @@ final class EngineTests: XCTestCase {
 
     /// A set left behind by a run that never restored is what the next run puts back, rather than
     /// the virtual devices it finds pinned.
-    func testDefaultDevicesKeepAnUnrestoredSet() throws {
-        let store = emptyStore()
+    func testDefaultDevicesKeepAnUnrestoredSet() async throws {
+        try await EngineActor.run {
+            let store = UserDefaults(suiteName: testSuite)!
+            store.removePersistentDomain(forName: testSuite)
+            try Self.checkDefaultDevices(store: store)
+        }
+    }
+
+    @EngineActor
+    private static func checkDefaultDevices(store: UserDefaults) throws {
         let remembered = SavedDefaults(
             output: "test.output", systemOutput: "test.system", input: "test.input")
 

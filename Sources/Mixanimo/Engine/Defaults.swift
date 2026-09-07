@@ -15,9 +15,9 @@ struct SavedDefaults: Codable, Equatable, Sendable {
 ///
 /// The remembered set is persisted, so a run that ended in a crash still has somewhere to go back
 /// to; the next `capture()` keeps it instead of remembering the virtual devices.
-@MainActor
+@EngineActor
 final class DefaultDevices {
-    private static let key = "savedDefaults"
+    private nonisolated static let key = "savedDefaults"
 
     private let store: UserDefaults
     private(set) var saved: SavedDefaults?

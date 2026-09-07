@@ -136,7 +136,7 @@ extension AudioObjectID {
 
 /// A live property listener. The listener is removed when this object is released, so keep it
 /// alive for as long as the notifications are wanted.
-final class AudioObjectPropertyListener {
+final class AudioObjectPropertyListener: @unchecked Sendable {
     private let objectID: AudioObjectID
     private var address: AudioObjectPropertyAddress
     private let block: AudioObjectPropertyListenerBlock

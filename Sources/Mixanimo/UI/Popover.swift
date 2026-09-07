@@ -42,7 +42,10 @@ struct Popover: View {
             Text("Mixanimo")
                 .font(.system(size: 13, weight: .semibold))
             Spacer()
-            if model.driver.isReady {
+            if model.isApplying {
+                ProgressView().controlSize(.small).scaleEffect(0.7).frame(width: 16, height: 16)
+                    .accessibilityLabel("Applying")
+            } else if model.driver.isReady {
                 Circle().fill(Theme.signal).frame(width: 5, height: 5)
                 Text(model.driver.message)
                     .font(.system(size: 10.5))

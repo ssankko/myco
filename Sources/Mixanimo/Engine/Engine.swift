@@ -4,19 +4,30 @@ import Observation
 import ServiceManagement
 import os
 
+/// The actor the engine and its nodes run on, so a device that takes its time to start or stop
+/// never holds the main thread.
+@globalActor
+actor EngineActor {
+    static let shared = EngineActor()
+
+    static func run<T: Sendable>(_ body: @EngineActor @Sendable () throws -> T) async rethrows -> T {
+        try await body()
+    }
+}
+
 /// The running audio graph.
 ///
 /// Every enabled output has one IO proc, which reads the driver's shared ring directly and pulls it
 /// through a resampler, the mic monitor, the EQ, the delay and the gains. Enabled inputs are summed
-/// to the mic mix at 48 kHz, which the `Mixanimo Mic` device publishes and every monitoring output
-/// taps directly.
+/// to the mic mix at 48 kHz, which the `Mixanimo Mic` device publishes and every output's monitor
+/// tap reads.
 ///
-/// The engine watches `model.settings` and the device list and reconciles the graph against them.
-/// Anything that changes the shape of the graph rebuilds it; gains, EQ bands and delays are pushed
-/// into the running DSP objects instead.
-@MainActor
+/// The engine takes a copy of `model.settings` whenever it changes and reconciles the graph against
+/// it. A change to the outputs rebuilds the whole graph; a change to the inputs rebuilds the inputs
+/// under the running outputs; gains, EQ bands and delays are pushed into the running DSP objects.
+@EngineActor
 final class Engine {
-    /// Everything that decides the shape of the graph. A difference here is a rebuild.
+    /// Everything that decides the shape of the graph.
     private struct Plan: Equatable {
         struct Output: Equatable {
             var uid: String
@@ -24,7 +35,6 @@ final class Engine {
             var sampleRate: Double
             /// What the device will run at, already clamped to its range.
             var bufferFrames: UInt32
-            var monitor: Bool
         }
 
         struct Input: Equatable {
@@ -42,19 +52,30 @@ final class Engine {
 
         /// The largest block any input writes into a monitor ring at once.
         var inputBlockFrames: Int { inputs.map(\.blockFrames).max() ?? 0 }
+
+        /// True when the outputs, and so everything hanging off them, must be built anew.
+        func rebuildsOutputs(from old: Plan) -> Bool {
+            virtualRate != old.virtualRate || outputs != old.outputs
+        }
     }
 
     private let model: AppModel
     private let managesDefaults: Bool
     private let log = Logger(subsystem: AppModel.appBundleID, category: "engine")
-    let defaultDevices: DefaultDevices
+    /// Thread-safe by contract, which the SDK does not spell out.
+    nonisolated(unsafe) private let defaultsStore: UserDefaults
+    lazy var defaultDevices = DefaultDevices(store: defaultsStore)
 
     private var running = false
+    private var settings = Settings()
+    private var master: Float = 1
+    private var masterMuted = false
     private var plan = Plan()
     private var feed: SharedFeed?
     private(set) var outputs: [OutputNode] = []
     private var inputs: [InputNode] = []
     private var micDrain: MicDrainNode?
+    private var outputStatus: [String: OutputStatus] = [:]
     private var listeners: [AudioObjectPropertyListener] = []
     private var eventTask: Task<Void, Never>?
     private var statusTask: Task<Void, Never>?
@@ -64,45 +85,45 @@ final class Engine {
 
     /// `managesDefaults` off leaves the machine's default devices alone, which is what a test that
     /// must not disturb the running system wants.
-    init(model: AppModel, managesDefaults: Bool = true, defaultsStore: UserDefaults = .standard) {
+    nonisolated init(model: AppModel, managesDefaults: Bool = true, defaultsStore: UserDefaults = .standard) {
         self.model = model
         self.managesDefaults = managesDefaults
-        self.defaultDevices = DefaultDevices(store: defaultsStore)
+        self.defaultsStore = defaultsStore
     }
 
     // MARK: Lifecycle
 
-    func start() {
+    func start() async {
         guard !running else { return }
         running = true
-        model.driver = DriverInstaller.status()
+        await publishDriver()
 
         if managesDefaults {
             defaultDevices.capture()
             defaultDevices.pin()
         }
-        watchVirtualDevice()
-        readMaster()
+        await watchVirtualDevice()
+        await readMaster()
 
+        let events = await model.devices.events()
         eventTask = Task { [weak self] in
-            guard let events = self?.model.devices.events() else { return }
             for await event in events {
                 guard let self else { return }
-                handle(event)
+                await handle(event)
             }
         }
         statusTask = Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(for: .milliseconds(500))
-                self?.pollCounters()
+                await self?.pollCounters()
             }
         }
 
-        observeSettings()
-        apply()
+        await observeSettings()
+        await apply(model.settings)
     }
 
-    func stop() {
+    func stop() async {
         guard running else { return }
         running = false
         eventTask?.cancel()
@@ -110,63 +131,75 @@ final class Engine {
         statusTask?.cancel()
         statusTask = nil
         listeners = []
-        teardown()
+        await teardown()
         feed?.unmap()
         feed = nil
         plan = Plan()
-        model.outputStatus = [:]
+        outputStatus = [:]
+        await publishStatus()
         if managesDefaults { defaultDevices.restore() }
     }
 
     /// Installs the bundled driver and reports what the machine has afterwards. The device list
     /// settles inside the installer, so the answer is the new state.
     func installDriver() async throws {
-        defer { model.driver = DriverInstaller.status() }
+        defer { Task { await publishDriver() } }
         try await DriverInstaller.install()
     }
 
     func uninstallDriver() async throws {
-        defer { model.driver = DriverInstaller.status() }
+        defer { Task { await publishDriver() } }
         try await DriverInstaller.uninstall()
     }
 
+    /// Every change to the settings is handed to the engine as a copy; the flag on the model tells
+    /// the popover that the graph is catching up.
+    @MainActor
     private func observeSettings() {
         withObservationTracking {
             _ = model.settings
         } onChange: { [weak self] in
             Task { @MainActor [weak self] in
-                guard let self, running else { return }
+                guard let self else { return }
                 observeSettings()
-                apply()
+                model.isApplying = true
+                await apply(model.settings)
+                model.isApplying = false
             }
         }
     }
 
-    private func handle(_ event: DeviceMonitor.Event) {
+    private func handle(_ event: DeviceMonitor.Event) async {
         switch event {
         case .arrived, .departed:
-            model.driver = DriverInstaller.status()
-            apply()
+            await publishDriver()
+            await apply(settings)
         case .aliveChanged, .sampleRateChanged:
-            apply()
+            await apply(settings)
         case .defaultChanged:
-            if managesDefaults, model.settings.pinDefaults { defaultDevices.pin() }
+            if managesDefaults, settings.pinDefaults { defaultDevices.pin() }
         }
     }
 
     // MARK: Reconciliation
 
-    private func apply() {
+    private func apply(_ wanted: Settings) async {
         guard running else { return }
+        settings = wanted
         applyLaunchAtLogin()
-        applyVirtualRate()
-        let wanted = makePlan()
-        if wanted != plan {
-            teardown()
-            plan = wanted
+        await applyVirtualRate()
+        let next = makePlan()
+        if next.rebuildsOutputs(from: plan) {
+            await teardown()
+            plan = next
             build()
+        } else if next.inputs != plan.inputs {
+            await teardownInputs()
+            plan = next
+            buildInputs()
         }
         pushParameters()
+        await publishStatus()
     }
 
     private var virtualDevice: AudioDevice? { (try? AudioDevice.find(uid: AppModel.outputDeviceUID)) ?? nil }
@@ -174,9 +207,9 @@ final class Engine {
 
     /// The virtual device is the one device the engine sets the rate on; a physical device keeps
     /// whatever rate it is at.
-    private func applyVirtualRate() {
+    private func applyVirtualRate() async {
         guard let device = virtualDevice else { return }
-        let wanted = model.settings.virtualRate
+        let wanted = settings.virtualRate
         guard (try? device.nominalSampleRate) != wanted else { return }
         do {
             try device.setNominalSampleRate(wanted)
@@ -186,7 +219,7 @@ final class Engine {
         }
         // The HAL performs the change on its own thread; the graph is built against the new rate.
         for _ in 0..<50 where (try? device.nominalSampleRate) != wanted {
-            Thread.sleep(forTimeInterval: 0.01)
+            try? await Task.sleep(for: .milliseconds(10))
         }
     }
 
@@ -196,19 +229,17 @@ final class Engine {
         guard virtualDevice != nil, let feed = openFeed() else { return Plan() }
         var wanted = Plan(virtualRate: feed.sampleRate)
 
-        let outputUIDs = Set(model.settings.outputs.filter(\.value.enabled).keys)
-        for uid in Engine.ordered(outputUIDs, listed: model.devices.outputs) {
+        let outputUIDs = Set(settings.outputs.filter(\.value.enabled).keys)
+        for uid in Engine.ordered(outputUIDs) {
             guard uid != AppModel.outputDeviceUID, let device = Engine.present(uid) else { continue }
-            let settings = model.output(uid)
             wanted.outputs.append(
                 Plan.Output(
                     uid: uid, deviceID: device.id,
                     sampleRate: (try? device.nominalSampleRate) ?? 0,
-                    bufferFrames: OutputNode.effectiveBufferFrames(device, settings.bufferFrames),
-                    monitor: settings.monitor))
+                    bufferFrames: OutputNode.effectiveBufferFrames(device, output(uid).bufferFrames)))
         }
-        let inputUIDs = Set(model.settings.inputs.filter(\.value.enabled).keys)
-        for uid in Engine.ordered(inputUIDs, listed: model.devices.inputs) {
+        let inputUIDs = Set(settings.inputs.filter(\.value.enabled).keys)
+        for uid in Engine.ordered(inputUIDs) where wanted.inputs.count < MonitorTap.maxInputs {
             guard uid != AppModel.micDeviceUID, uid != AppModel.outputDeviceUID,
                 let device = Engine.present(uid)
             else { continue }
@@ -231,17 +262,18 @@ final class Engine {
             feed = try SharedFeed.open()
         } catch {
             log.error("shared feed: \(String(describing: error), privacy: .public)")
-            model.driver = DriverInstaller.installedVersion().map {
-                .outdated(installed: $0, bundled: DriverInstaller.bundledVersion)
+            let status = DriverInstaller.installedVersion().map {
+                DriverStatus.outdated(installed: $0, bundled: DriverInstaller.bundledVersion)
             } ?? .notInstalled
+            Task { @MainActor in model.driver = status }
         }
         return feed
     }
 
-    /// `wanted` in the order the device list shows them, followed by the ones the list leaves out
-    /// because the HAL hides them from this process; a hidden device still works by UID.
-    private static func ordered(_ wanted: Set<String>, listed: [AudioDevice]) -> [String] {
-        var uids = listed.compactMap { device -> String? in
+    /// `wanted` in the order the HAL lists them, followed by the ones the HAL hides from this
+    /// process; a hidden device still works by UID.
+    private nonisolated static func ordered(_ wanted: Set<String>) -> [String] {
+        var uids = ((try? AudioDevice.all) ?? []).compactMap { device -> String? in
             guard let uid = try? device.uid, wanted.contains(uid) else { return nil }
             return uid
         }
@@ -250,81 +282,110 @@ final class Engine {
     }
 
     /// The device behind a UID, when the HAL still has it and it is alive.
-    private static func present(_ uid: String) -> AudioDevice? {
+    private nonisolated static func present(_ uid: String) -> AudioDevice? {
         guard let device = (try? AudioDevice.find(uid: uid)) ?? nil, device.isAlive else { return nil }
         return device
     }
 
+    private func output(_ uid: String) -> OutputSettings { settings.outputs[uid] ?? OutputSettings() }
+    private func input(_ uid: String) -> InputSettings { settings.inputs[uid] ?? InputSettings() }
+
     private func build() {
         guard let feed = openFeed() else { return }
-
         for item in plan.outputs {
             do {
                 outputs.append(
                     try OutputNode(
                         uid: item.uid, device: AudioDevice(id: item.deviceID),
-                        settings: model.output(item.uid), virtualRate: plan.virtualRate,
-                        feed: feed, inputs: plan.inputs.count,
-                        inputBlockFrames: plan.inputBlockFrames))
+                        settings: output(item.uid), virtualRate: plan.virtualRate, feed: feed))
             } catch {
                 log.error("output \(item.uid, privacy: .public): \(String(describing: error), privacy: .public)")
             }
         }
+        // Consumers first, so a producer never writes into a ring nobody drains.
+        for output in outputs { try? output.start() }
+        outputStatus = Dictionary(
+            uniqueKeysWithValues: outputs.map {
+                ($0.uid, OutputStatus(isActive: true, sampleRate: $0.sampleRate))
+            })
+        buildInputs()
+    }
 
-        if !plan.inputs.isEmpty, let mic = micDevice {
-            micDrain = try? MicDrainNode(
-                device: mic, inputs: plan.inputs.count, inputBlockFrames: plan.inputBlockFrames)
+    /// Points every output's monitor tap at the planned inputs and starts them, under outputs that
+    /// keep playing.
+    private func buildInputs() {
+        let count = plan.inputs.count
+        let block = plan.inputBlockFrames
+        for output in outputs { output.tap.configure(inputs: count, producerFrames: block) }
+        guard count > 0 else { return }
+
+        if let mic = micDevice {
+            micDrain = try? MicDrainNode(device: mic, inputs: count, inputBlockFrames: block)
         }
-
         for (index, item) in plan.inputs.enumerated() {
             var rings: [RingBuffer] = []
             if let micDrain { rings.append(micDrain.tap.rings[index]) }
-            for output in outputs { if let tap = output.tap { rings.append(tap.rings[index]) } }
+            for output in outputs { rings.append(output.tap.rings[index]) }
             do {
                 inputs.append(
                     try InputNode(
                         uid: item.uid, device: AudioDevice(id: item.deviceID),
-                        settings: model.input(item.uid), destinations: rings))
+                        settings: input(item.uid), destinations: rings))
             } catch {
                 log.error("input \(item.uid, privacy: .public): \(String(describing: error), privacy: .public)")
             }
         }
-
-        // Consumers first, so a producer never writes into a ring nobody drains.
-        for output in outputs { try? output.start() }
         try? micDrain?.start()
         for input in inputs { try? input.start() }
-
-        model.outputStatus = Dictionary(
-            uniqueKeysWithValues: outputs.map {
-                ($0.uid, OutputStatus(isActive: true, sampleRate: $0.sampleRate))
-            })
     }
 
     /// Tears the graph down producer first, so nothing writes into a ring that is already gone.
-    private func teardown() {
+    private func teardown() async {
+        await fade(outputs: outputs, inputs: inputs)
+        stopInputs()
+        for output in outputs { output.stop() }
+        outputs = []
+        outputStatus = [:]
+        playing = []
+    }
+
+    private func teardownInputs() async {
+        await fade(outputs: [], inputs: inputs)
+        stopInputs()
+        for output in outputs { output.tap.configure(inputs: 0, producerFrames: 0) }
+    }
+
+    private func stopInputs() {
         for input in inputs { input.stop() }
         inputs = []
         micDrain?.stop()
         micDrain = nil
-        for output in outputs { output.stop() }
-        outputs = []
-        playing = []
+    }
+
+    /// Ramps the given nodes to silence and waits for the ramp to play out, so a proc that stops
+    /// does not cut a waveform in the middle.
+    private func fade(outputs: [OutputNode], inputs: [InputNode]) async {
+        guard !outputs.isEmpty || !inputs.isEmpty else { return }
+        for node in outputs { node.masterTarget.value = 0 }
+        for node in inputs { node.gainTarget.value = 0 }
+        // Two IO cycles at the largest buffer a device runs, plus the gain ramp.
+        try? await Task.sleep(for: .milliseconds(40))
     }
 
     // MARK: Parameters
 
     private func pushParameters() {
-        let master = model.masterMuted ? 0 : Engine.masterLinear(model.master)
+        let master = masterMuted ? 0 : Engine.masterLinear(master)
         for node in outputs {
-            let settings = model.output(node.uid)
+            let settings = output(node.uid)
             node.gainTarget.value = decibelsToLinear(settings.gainDB)
-            node.monitorGainTarget.value = decibelsToLinear(settings.monitorGainDB)
+            node.monitorGainTarget.value =
+                settings.monitor && !plan.inputs.isEmpty ? decibelsToLinear(settings.monitorGainDB) : 0
             node.masterTarget.value = master
             if settings.eq.count == Equalizer.bandCount { node.eq.setBands(settings.eq) }
         }
         for node in inputs {
-            let settings = model.input(node.uid)
+            let settings = input(node.uid)
             node.gainTarget.value = settings.muted ? 0 : decibelsToLinear(settings.gainDB)
         }
         applyDelays()
@@ -332,48 +393,53 @@ final class Engine {
 
     /// Sync on delays every output to the slowest one and adds its trim; sync off means no delay.
     private func applyDelays() {
-        let sync = model.settings.sync
+        let sync = settings.sync
         let aligned = sync
             ? alignmentDelays(outputs.map(\.latency))
             : Array(repeating: 0, count: outputs.count)
         for (index, node) in outputs.enumerated() {
-            let trim = sync ? model.output(node.uid).syncTrimMilliseconds : 0
+            let trim = sync ? output(node.uid).syncTrimMilliseconds : 0
             let frames = max(0, aligned[index] + Int((trim / 1000 * node.sampleRate).rounded()))
             node.delay.setDelay(frames: frames)
-            var status = model.outputStatus[node.uid] ?? OutputStatus()
+            var status = outputStatus[node.uid] ?? OutputStatus()
             status.isActive = true
             status.sampleRate = node.sampleRate
             status.latencyMilliseconds = node.latency.seconds * 1000
             status.delayMilliseconds = node.sampleRate > 0 ? Double(frames) / node.sampleRate * 1000 : 0
-            write(status, for: node.uid)
+            outputStatus[node.uid] = status
         }
     }
 
     /// Copies what the IO threads counted into the status the UI reads.
-    func pollCounters() {
+    func pollCounters() async {
         for node in outputs {
-            if var status = model.outputStatus[node.uid] {
-                status.underruns = node.underruns.value
-                write(status, for: node.uid)
-            }
+            outputStatus[node.uid]?.underruns = node.underruns.value
             let frames = node.frames.value
             if frames > 0, playing.insert(node.uid).inserted {
                 log.info("output \(node.uid, privacy: .public) is playing, \(frames) frames read")
             }
         }
+        await publishStatus()
     }
 
-    /// Stores a status only when it changed, because writing the same value again still tells every
-    /// view that reads it to lay out anew.
-    private func write(_ status: OutputStatus, for uid: String) {
-        guard model.outputStatus[uid] != status else { return }
-        model.outputStatus[uid] = status
+    /// Hands the status to the model only when it changed, because writing the same value again
+    /// still tells every view that reads it to lay out anew.
+    private func publishStatus() async {
+        let status = outputStatus
+        await MainActor.run {
+            if model.outputStatus != status { model.outputStatus = status }
+        }
+    }
+
+    private func publishDriver() async {
+        let status = DriverInstaller.status()
+        await MainActor.run { model.driver = status }
     }
 
     private func applyLaunchAtLogin() {
         // Only the shipped app may register itself; a test host must not end up in the login items.
         guard Bundle.main.bundleIdentifier == AppModel.appBundleID else { return }
-        let wanted = model.settings.launchAtLogin
+        let wanted = settings.launchAtLogin
         guard wanted != launchAtLoginApplied else { return }
         launchAtLoginApplied = wanted
         // The service refuses an unregister it never registered, so a setting that already matches
@@ -393,32 +459,39 @@ final class Engine {
     // MARK: Master
 
     /// The driver's volume slider is a cube taper, so the scalar cubed is the gain it shows.
-    static func masterLinear(_ scalar: Float) -> Float {
+    nonisolated static func masterLinear(_ scalar: Float) -> Float {
         let clamped = min(max(scalar, 0), 1)
         return clamped * clamped * clamped
     }
 
     /// Keeps the master gain in step with the virtual device's volume control.
-    private func watchVirtualDevice() {
+    private func watchVirtualDevice() async {
         guard let device = virtualDevice else { return }
         let master: [AudioObjectPropertySelector] = [
             kAudioDevicePropertyVolumeScalar, kAudioDevicePropertyMute,
         ]
-        listeners = master.compactMap { selector in
-            try? AudioObjectPropertyListener(
-                device.id,
-                AudioObjectPropertyAddress(
-                    selector, kAudioObjectPropertyScopeOutput, kAudioObjectPropertyElementWildcard)
-            ) { [weak self] _ in
-                self?.readMaster()
+        listeners = await MainActor.run {
+            master.compactMap { selector in
+                try? AudioObjectPropertyListener(
+                    device.id,
+                    AudioObjectPropertyAddress(
+                        selector, kAudioObjectPropertyScopeOutput, kAudioObjectPropertyElementWildcard)
+                ) { [weak self] _ in
+                    Task { await self?.readMaster() }
+                }
             }
         }
     }
 
-    private func readMaster() {
+    private func readMaster() async {
         guard let device = virtualDevice else { return }
-        if let scalar = (try? device.volumeScalar(scope: .output)) ?? nil { model.master = scalar }
-        if let muted = (try? device.mute(scope: .output)) ?? nil { model.masterMuted = muted }
+        if let scalar = (try? device.volumeScalar(scope: .output)) ?? nil { master = scalar }
+        if let muted = (try? device.mute(scope: .output)) ?? nil { masterMuted = muted }
+        let (scalar, muted) = (master, masterMuted)
+        await MainActor.run {
+            model.master = scalar
+            model.masterMuted = muted
+        }
         pushParameters()
     }
 }

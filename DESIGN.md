@@ -31,7 +31,9 @@ Realtime rules inside the driver: no allocation, no locks, no unchecked indexing
 
 ### Engine (Swift, `Sources/Mixanimo/Engine`)
 
-Runs in the app process.
+Runs in the app process on its own actor, so a device that takes its time to start or stop never holds the popover; the model carries a flag while the graph catches up with a settings change.
+
+A change to the outputs or the virtual rate rebuilds the whole graph. A change to the inputs, or to a monitor toggle, does not: every output carries a monitor tap with a fixed set of rings that the inputs are pointed at, and the monitor gain ramps between zero and the set level. Before any node stops, its gain ramps to zero and the engine waits for the ramp to play out; every new node starts silent and ramps in.
 
 Output path:
 
@@ -47,7 +49,7 @@ Input path:
 1. Each enabled physical input has its own IO callback. Per input: gain, mute.
 2. All enabled inputs are resampled to 48000 and summed into the mic mix.
 3. The mix is written into `Mixanimo Mic` for other apps.
-4. Outputs with monitor on read the same mix through a direct ring at their own buffer size, not through the driver, so the wired path stays at a few milliseconds.
+4. Every output reads the same mix through a direct ring at its own buffer size, not through the driver, so the wired path stays at a few milliseconds; with monitor off the ring is drained and dropped. The monitor plays whether or not anything plays into the virtual device.
 
 Hot swap: the engine listens for `kAudioHardwarePropertyDevices`. A device whose UID has saved settings resumes with them. A device seen for the first time is listed off. Built-in speakers are never enabled automatically.
 
@@ -59,7 +61,7 @@ Lifecycle: on launch, remember the current default output and input, then pin to
 
 ### App (SwiftUI, `Sources/Mixanimo/UI`)
 
-Menu bar item with a popover. Popover contents: master slider, output list (row: enable toggle, name, transport icon, volume, buffer size, monitor toggle and gain, sync trim when sync is on, EQ button), input list (row: enable toggle, name, gain, mute), virtual rate picker, sync toggle, driver status with install/uninstall, settings (pin defaults, launch at login). EQ opens in its own window per output. Visual design follows the frontend-design skill.
+Menu bar item with a popover, both plain AppKit windows; the app opens no SwiftUI scene window, because a window left on another space makes activation switch to that space. Popover contents: master slider, output list (row: enable toggle, name, transport icon, volume, buffer size, monitor toggle and gain, sync trim when sync is on, EQ button), input list (row: enable toggle, name, gain, mute), virtual rate picker, sync toggle, driver status with install/uninstall, settings (pin defaults, launch at login). EQ opens in its own window per output. Visual design follows the frontend-design skill.
 
 Settings persist in `UserDefaults`, keyed by device UID.
 

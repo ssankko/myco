@@ -28,9 +28,9 @@ enum DriverStatus: Equatable, Sendable {
 @MainActor
 @Observable
 final class AppModel {
-    static let appBundleID = "com.mixanimo.app"
-    static let outputDeviceUID = "com.mixanimo.output"
-    static let micDeviceUID = "com.mixanimo.mic"
+    nonisolated static let appBundleID = "com.mixanimo.app"
+    nonisolated static let outputDeviceUID = "com.mixanimo.output"
+    nonisolated static let micDeviceUID = "com.mixanimo.mic"
 
     var settings: Settings {
         didSet { if settings != oldValue { settings.save() } }
@@ -45,6 +45,8 @@ final class AppModel {
 
     var outputStatus: [String: OutputStatus] = [:]
     var driver: DriverStatus = .unknown
+    /// True from a settings change until the engine has reshaped the graph to match it.
+    var isApplying = false
 
     init(settings: Settings = .load()) {
         self.settings = settings

@@ -32,7 +32,10 @@ struct Popover: View {
             footer
         }
         .padding(14)
+        // The window takes its final size at once while a row still animates its height, so the
+        // content is held to the top and grows down instead of out from the middle.
         .frame(width: Theme.popoverWidth)
+        .frame(maxHeight: .infinity, alignment: .top)
     }
 
     private var header: some View {

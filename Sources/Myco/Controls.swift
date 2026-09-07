@@ -226,7 +226,7 @@ struct MycoMark: View {
     /// The glyph as a template image, so the status item and the popover both draw it in the
     /// current text colour.
     static let glyph: NSImage = {
-        let image = NSImage(contentsOf: Bundle.module.url(forResource: "Myco", withExtension: "svg")!)!
+        let image = NSImage(contentsOf: Bundle.main.url(forResource: "Myco", withExtension: "svg")!)!
         image.isTemplate = true
         return image
     }()

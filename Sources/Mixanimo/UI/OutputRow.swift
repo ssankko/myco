@@ -5,7 +5,6 @@ import SwiftUI
 struct OutputRow: View {
     let model: AppModel
     let entry: DeviceEntry
-    @Environment(\.openWindow) private var openWindow
 
     /// The buffer size, the sync trim and the measured latency, which are set once and then left.
     @State private var showsMore = false
@@ -66,7 +65,7 @@ struct OutputRow: View {
             GlyphToggle(
                 label: "Monitor microphones on \(entry.name)", symbol: "ear",
                 isOn: binding(\.monitor))
-            Button { openWindow(id: "eq", value: entry.id) } label: {
+            Button { EQWindows.show(model: model, uid: entry.id) } label: {
                 Text("EQ")
                     .font(.system(size: 11, weight: .medium))
                     .glyphChrome(tint: Theme.signal)

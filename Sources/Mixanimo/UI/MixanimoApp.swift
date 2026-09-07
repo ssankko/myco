@@ -4,6 +4,7 @@ import SwiftUI
 @main
 @MainActor
 struct MixanimoApp: App {
+    @NSApplicationDelegateAdaptor private var delegate: AppDelegate
     @State private var model: AppModel
     @State private var actions: Actions
     @State private var engine: Engine
@@ -16,10 +17,8 @@ struct MixanimoApp: App {
         let engine = Engine(model: model)
         actions.install = { try? await engine.installDriver() }
         actions.uninstall = { try? await engine.uninstallDriver() }
-        engine.start()
-        NotificationCenter.default.addObserver(
-            forName: NSApplication.willTerminateNotification, object: nil, queue: .main
-        ) { _ in MainActor.assumeIsolated { engine.stop() } }
+        Task { await engine.start() }
+        AppDelegate.stop = { await engine.stop() }
         _model = State(initialValue: model)
         _actions = State(initialValue: actions)
         _engine = State(initialValue: engine)
@@ -27,17 +26,53 @@ struct MixanimoApp: App {
     }
 
     var body: some Scene {
-        // One equaliser window per output. `Window` gained a value-carrying form after
-        // macOS 14, so the group stands in for it. With no default value the group opens
-        // nothing until a row asks for a window.
-        WindowGroup("Equaliser", id: "eq", for: String.self) { $uid in
-            if let uid {
-                EQWindow(model: model, uid: uid)
-                    // An accessory app opens windows behind whatever is in front otherwise.
-                    .onAppear { NSApplication.shared.activate(ignoringOtherApps: true) }
-            }
+        // A scene group would open a window of its own at launch, which then pins the app to the
+        // space it launched in; the equaliser windows are plain windows opened by `EQWindows`.
+        SwiftUI.Settings { EmptyView() }
+    }
+}
+
+/// One equaliser window per output. A window is kept once made, so closing and reopening it
+/// keeps its state, and it follows the user to whichever space they are on.
+@MainActor
+enum EQWindows {
+    private static var windows: [String: NSWindow] = [:]
+
+    static func show(model: AppModel, uid: String) {
+        let window = windows[uid] ?? make(model: model, uid: uid)
+        windows[uid] = window
+        window.makeKeyAndOrderFront(nil)
+        NSApplication.shared.activate()
+    }
+
+    private static func make(model: AppModel, uid: String) -> NSWindow {
+        let host = NSHostingController(rootView: EQWindow(model: model, uid: uid))
+        host.sizingOptions = [.preferredContentSize]
+        let window = NSWindow(contentViewController: host)
+        window.title = "Equaliser"
+        window.styleMask = [.titled, .closable, .miniaturizable]
+        window.isReleasedWhenClosed = false
+        // Ordering the window front brings it to the current space rather than switching to
+        // the one it was last on, and a full-screen app does not hide it.
+        window.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
+        window.center()
+        return window
+    }
+}
+
+/// Holds the quit until the engine has faded out and put the default devices back.
+@MainActor
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    static var stop: (() async -> Void)?
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let stop = AppDelegate.stop else { return .terminateNow }
+        AppDelegate.stop = nil
+        Task {
+            await stop()
+            sender.reply(toApplicationShouldTerminate: true)
         }
-        .windowResizability(.contentSize)
+        return .terminateLater
     }
 }
 

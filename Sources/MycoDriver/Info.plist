@@ -7,7 +7,7 @@
 	<key>CFBundleExecutable</key>
 	<string>MycoDriver</string>
 	<key>CFBundleIdentifier</key>
-	<string>com.myco.driver</string>
+	<string>com.ssankko.myco.driver</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>

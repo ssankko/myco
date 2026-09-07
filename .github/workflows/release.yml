@@ -1,0 +1,52 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  release:
+    runs-on: macos-15
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Import the Developer ID certificate
+        env:
+          P12_BASE64: ${{ secrets.DEVELOPER_ID_P12 }}
+          P12_PASSWORD: ${{ secrets.DEVELOPER_ID_P12_PASSWORD }}
+        run: |
+          echo "$P12_BASE64" | base64 --decode > certificate.p12
+          security create-keychain -p "" build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "" build.keychain
+          security import certificate.p12 -k build.keychain -P "$P12_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "" build.keychain
+          rm certificate.p12
+
+      - name: Build and sign
+        env:
+          CODESIGN_IDENTITY: Developer ID Application
+        run: APP_VERSION="${VERSION#v}" ./scripts/bundle.sh
+
+      - name: Notarize and staple
+        env:
+          NOTARY_KEY_P8: ${{ secrets.NOTARY_KEY_P8 }}
+          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
+        run: |
+          echo "$NOTARY_KEY_P8" > notary.p8
+          ditto -c -k --keepParent dist/Myco.app notarize.zip
+          xcrun notarytool submit notarize.zip --key notary.p8 --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER_ID" --wait
+          xcrun stapler staple dist/Myco.app
+          rm notary.p8 notarize.zip
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ditto -c -k --keepParent dist/Myco.app "Myco-${VERSION#v}.zip"
+          gh release create "$VERSION" "Myco-${VERSION#v}.zip" --generate-notes

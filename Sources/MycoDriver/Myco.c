@@ -23,10 +23,10 @@
 //  The one place the driver version lives; the app reads it through the 'mxvr' custom property.
 #define kDriverVersion  CFSTR("0.3.0")
 
-#define kBoxUID         CFSTR("com.myco.box")
+#define kBoxUID         CFSTR("com.ssankko.myco.box")
 #define kManufacturer   CFSTR("Myco")
-#define kBundleID       CFSTR("com.myco.driver")
-#define kAppBundleID    CFSTR("com.myco.app")
+#define kBundleID       CFSTR("com.ssankko.myco.driver")
+#define kAppBundleID    CFSTR("com.ssankko.myco")
 
 enum
 {
@@ -111,8 +111,8 @@ static DeviceState gDevices[2] =
         .mOutputStreamID = kObjectID_Stream_Out_Output,
         .mVolumeID = kObjectID_Volume_Out,
         .mMuteID = kObjectID_Mute_Out,
-        .mUID = CFSTR("com.myco.output"),
-        .mModelUID = CFSTR("com.myco.output.model"),
+        .mUID = CFSTR("com.ssankko.myco.output"),
+        .mModelUID = CFSTR("com.ssankko.myco.output.model"),
         .mName = CFSTR("Myco"),
         .mChannels = kFeedChannels,
         .mRates = kRatesOut,
@@ -130,8 +130,8 @@ static DeviceState gDevices[2] =
         .mOutputStreamID = kObjectID_Stream_Mic_Output,
         .mVolumeID = kAudioObjectUnknown,
         .mMuteID = kAudioObjectUnknown,
-        .mUID = CFSTR("com.myco.mic"),
-        .mModelUID = CFSTR("com.myco.mic.model"),
+        .mUID = CFSTR("com.ssankko.myco.mic"),
+        .mModelUID = CFSTR("com.ssankko.myco.mic.model"),
         .mName = CFSTR("Myco Mic"),
         .mChannels = 1,
         .mRates = kRatesMic,

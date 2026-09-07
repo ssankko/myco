@@ -12,8 +12,8 @@ import XCTest
 
 final class DriverLoopbackTests: XCTestCase {
 
-    private static let outputUID = "com.myco.output"
-    private static let micUID = "com.myco.mic"
+    private static let outputUID = "com.ssankko.myco.output"
+    private static let micUID = "com.ssankko.myco.mic"
 
     // MARK: - Property helpers
 
@@ -244,6 +244,6 @@ final class DriverLoopbackTests: XCTestCase {
             AudioDeviceDestroyIOProcID(deviceID, proc!)
         }
 
-        XCTAssertEqual(isHidden(deviceID), 1, "the test process is not com.myco.app, so the device stays hidden")
+        XCTAssertEqual(isHidden(deviceID), 1, "the test process is not com.ssankko.myco, so the device stays hidden")
     }
 }

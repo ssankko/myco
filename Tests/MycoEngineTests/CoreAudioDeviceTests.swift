@@ -39,7 +39,7 @@ final class CoreAudioDeviceTests: XCTestCase {
         let found = try XCTUnwrap(AudioDevice.find(uid: uid))
         XCTAssertEqual(found.id, speakers.id)
         XCTAssertEqual(try found.uid, uid)
-        XCTAssertNil(try AudioDevice.find(uid: "com.myco.no-such-device"))
+        XCTAssertNil(try AudioDevice.find(uid: "com.ssankko.myco.no-such-device"))
     }
 
     func testBufferFrameSizeRoundTrips() throws {

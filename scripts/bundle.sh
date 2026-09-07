@@ -1,6 +1,18 @@
 #!/bin/bash
 #  Builds the package and assembles dist/Myco.driver and dist/Myco.app.
+#  APP_VERSION is the version the app bundle reports. CODESIGN_IDENTITY names the certificate to
+#  sign with; unset, both bundles get an ad hoc signature, which is enough to run on this machine.
 set -euo pipefail
+
+APP_VERSION="${APP_VERSION:-0.1.0}"
+CODESIGN_IDENTITY="${CODESIGN_IDENTITY:-}"
+sign() {
+	if [ -n "$CODESIGN_IDENTITY" ]; then
+		codesign --force --sign "$CODESIGN_IDENTITY" --options runtime --timestamp "$@"
+	else
+		codesign --force --sign - "$@"
+	fi
+}
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD="$ROOT/.build/release"
@@ -42,13 +54,13 @@ for SIZE in 16 32 128 256 512; do
 	sips -z "$((SIZE * 2))" "$((SIZE * 2))" "$ICONSET/../Myco.svg.png" --out "$ICONSET/icon_${SIZE}x${SIZE}@2x.png" > /dev/null
 done
 iconutil -c icns "$ICONSET" -o "$DRIVER/Contents/Resources/Myco.icns"
-codesign --force --sign - "$DRIVER"
+sign "$DRIVER"
 
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BUILD/Myco" "$APP/Contents/MacOS/Myco"
 cp -R "$BUILD/Myco_Myco.bundle" "$APP/Contents/Resources/"
 cp "$DRIVER/Contents/Resources/Myco.icns" "$APP/Contents/Resources/"
-cat > "$APP/Contents/Info.plist" <<'PLIST'
+cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -58,7 +70,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 	<key>CFBundleIconFile</key>
 	<string>Myco</string>
 	<key>CFBundleIdentifier</key>
-	<string>com.myco.app</string>
+	<string>com.ssankko.myco</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
@@ -66,7 +78,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.1.0</string>
+	<string>$APP_VERSION</string>
 	<key>CFBundleVersion</key>
 	<string>1</string>
 	<key>LSMinimumSystemVersion</key>
@@ -79,6 +91,6 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 </plist>
 PLIST
 cp -R "$DRIVER" "$APP/Contents/Resources/Myco.driver"
-codesign --force --sign - "$APP"
+sign --entitlements "$ROOT/Sources/Myco/Myco.entitlements" "$APP"
 
 echo "built $DRIVER and $APP"

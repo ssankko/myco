@@ -10,7 +10,7 @@ struct DriverInstallerError: Error, CustomStringConvertible {
 /// The installed version comes from the plug-in object's `'mxvr'` property, so it describes the
 /// driver coreaudiod actually loaded; the bundled version comes from the copy inside the app.
 enum DriverInstaller {
-    static let bundleID = "com.myco.driver"
+    static let bundleID = "com.ssankko.myco.driver"
     static let installedPath = "/Library/Audio/Plug-Ins/HAL/Myco.driver"
 
     /// `'mxvr'`, the version property the driver publishes on its plug-in object.

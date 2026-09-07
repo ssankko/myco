@@ -8,7 +8,7 @@ import XCTest
 @testable import MycoEngine
 
 /// A store of its own, so a test never reads or writes what the app saved.
-private let testSuite = "com.myco.tests"
+private let testSuite = "com.ssankko.myco.tests"
 
 @MainActor
 final class EngineTests: XCTestCase {

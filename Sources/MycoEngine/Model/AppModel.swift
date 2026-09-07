@@ -33,9 +33,9 @@ package enum DriverStatus: Equatable, Sendable {
 @MainActor
 @Observable
 package final class AppModel {
-    package nonisolated static let appBundleID = "com.myco.app"
-    package nonisolated static let outputDeviceUID = "com.myco.output"
-    package nonisolated static let micDeviceUID = "com.myco.mic"
+    package nonisolated static let appBundleID = "com.ssankko.myco"
+    package nonisolated static let outputDeviceUID = "com.ssankko.myco.output"
+    package nonisolated static let micDeviceUID = "com.ssankko.myco.mic"
 
     package var settings: Settings {
         didSet { if settings != oldValue { settings.save() } }

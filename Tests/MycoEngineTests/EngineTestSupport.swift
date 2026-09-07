@@ -125,7 +125,7 @@ final class PrivateAggregate {
     let uid: String
 
     init(over device: AudioDevice) throws {
-        uid = "com.myco.tests.\(UUID().uuidString)"
+        uid = "com.ssankko.myco.tests.\(UUID().uuidString)"
         let description: [String: Any] = [
             kAudioAggregateDeviceNameKey: "Myco test output",
             kAudioAggregateDeviceUIDKey: uid,

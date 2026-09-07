@@ -2,7 +2,6 @@ import CoreAudio
 import Foundation
 import MixanimoDSP
 import Observation
-import ServiceManagement
 import os
 
 /// The actor the engine and its nodes run on, so a device that takes its time to start or stop
@@ -99,7 +98,6 @@ package final class Engine {
     private var listeners: [AudioObjectPropertyListener] = []
     private var eventTask: Task<Void, Never>?
     private var statusTask: Task<Void, Never>?
-    private var launchAtLoginApplied: Bool?
     /// UIDs already reported as playing, so the log line lands once per graph.
     private var playing: Set<String> = []
 
@@ -207,7 +205,6 @@ package final class Engine {
     private func apply(_ wanted: Settings, replan: Bool = false) async {
         guard running else { return }
         settings = wanted
-        applyLaunchAtLogin()
         let inputs = PlanInputs(wanted)
         if replan || inputs != planInputs {
             planInputs = inputs
@@ -475,26 +472,6 @@ package final class Engine {
     private func publishDriver() async {
         let status = DriverInstaller.status()
         await MainActor.run { model.driver = status }
-    }
-
-    private func applyLaunchAtLogin() {
-        // Only the shipped app may register itself; a test host must not end up in the login items.
-        guard Bundle.main.bundleIdentifier == AppModel.appBundleID else { return }
-        let wanted = settings.launchAtLogin
-        guard wanted != launchAtLoginApplied else { return }
-        launchAtLoginApplied = wanted
-        // The service refuses an unregister it never registered, so a setting that already matches
-        // the login items is left alone rather than pushed again.
-        guard wanted != (SMAppService.mainApp.status == .enabled) else { return }
-        do {
-            if wanted {
-                try SMAppService.mainApp.register()
-            } else {
-                try SMAppService.mainApp.unregister()
-            }
-        } catch {
-            log.error("launch at login \(wanted): \(String(describing: error), privacy: .public)")
-        }
     }
 
     // MARK: Master

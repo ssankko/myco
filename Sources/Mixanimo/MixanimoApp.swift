@@ -16,6 +16,7 @@ struct MixanimoApp: App {
         let model = AppModel()
         let actions = Actions()
         let engine = Engine(model: model)
+        LaunchAtLogin.observe(model)
         actions.install = { try? await engine.installDriver() }
         actions.uninstall = { try? await engine.uninstallDriver() }
         Task { await engine.start() }

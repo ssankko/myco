@@ -100,7 +100,7 @@ struct Popover: View {
         VStack(alignment: .leading, spacing: 3) {
             SectionHeader(
                 title: "Outputs",
-                detail: onCount(outputs.count, model.settings.outputs.values.filter(\.enabled).count))
+                detail: onCount(outputs.count, outputs.filter { model.output($0.id).enabled }.count))
                 .padding(.bottom, 2)
             if outputs.isEmpty {
                 EmptyLane(text: "Nothing to play to. Connect headphones or speakers.")
@@ -112,7 +112,7 @@ struct Popover: View {
         VStack(alignment: .leading, spacing: 3) {
             SectionHeader(
                 title: "Inputs",
-                detail: onCount(inputs.count, model.settings.inputs.values.filter(\.enabled).count))
+                detail: onCount(inputs.count, inputs.filter { model.input($0.id).enabled }.count))
                 .padding(.bottom, 2)
             if inputs.isEmpty {
                 EmptyLane(text: "Nothing to mix in. Connect a microphone.")
@@ -177,7 +177,7 @@ struct Popover: View {
     }
 
     private func onCount(_ total: Int, _ on: Int) -> String {
-        total == 0 ? "none" : "\(min(on, total)) of \(total) on"
+        total == 0 ? "none" : "\(on) of \(total) on"
     }
 
     private func rateLabel(_ rate: Double) -> String {

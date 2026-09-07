@@ -10,6 +10,8 @@ enum Theme {
     static let caution = dynamic(light: (0.72, 0.47, 0.06), dark: (0.95, 0.70, 0.25))
     /// Nothing is flowing: no driver, a dead device.
     static let stopped = dynamic(light: (0.76, 0.25, 0.24), dark: (1.00, 0.45, 0.42))
+    /// A control that takes something away and does not put it back.
+    static let danger = stopped
 
     /// Hairline the rails and dividers share, so an idle row still shows its lane.
     static let track = Color.primary.opacity(0.11)

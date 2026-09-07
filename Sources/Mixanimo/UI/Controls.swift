@@ -133,26 +133,6 @@ extension AudioDevice.TransportType {
     }
 }
 
-/// Opens the part of a card the user sets once and leaves alone.
-struct MoreToggle: View {
-    let label: String
-    @Binding var isOn: Bool
-
-    var body: some View {
-        Button { isOn.toggle() } label: {
-            Image(systemName: "chevron.down")
-                .font(.system(size: 9, weight: .semibold))
-                .rotationEffect(.degrees(isOn ? 0 : -90))
-                .frame(width: 14, height: 14)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.borderless)
-        .foregroundStyle(.secondary)
-        .accessibilityLabel(label)
-        .accessibilityValue(isOn ? "shown" : "hidden")
-    }
-}
-
 /// A slider with its number pinned to a fixed-width column, so a stack of them lines up.
 struct MeterSlider: View {
     let label: String
@@ -161,6 +141,8 @@ struct MeterSlider: View {
     let step: Double
     let readout: String
     var readoutWidth: CGFloat = 52
+    /// Where a double click on the readout puts the value.
+    var reset: Double?
 
     var body: some View {
         HStack(spacing: 8) {
@@ -169,11 +151,24 @@ struct MeterSlider: View {
                 .tint(Theme.signal)
                 .accessibilityLabel(label)
                 .accessibilityValue(readout)
-            Text(readout)
-                .font(.system(size: 11).monospacedDigit())
-                .foregroundStyle(.secondary)
-                .frame(width: readoutWidth, alignment: .trailing)
-                .accessibilityHidden(true)
+            number
+        }
+    }
+
+    @ViewBuilder
+    private var number: some View {
+        let text = Text(readout)
+            .font(.system(size: 11).monospacedDigit())
+            .foregroundStyle(.secondary)
+            .frame(width: readoutWidth, alignment: .trailing)
+            .accessibilityHidden(true)
+        if let reset {
+            text
+                .contentShape(.rect)
+                .onTapGesture(count: 2) { value = reset }
+                .help("Double-click to reset")
+        } else {
+            text
         }
     }
 }
@@ -199,6 +194,8 @@ struct GlyphToggle: View {
     let label: String
     let symbol: String
     @Binding var isOn: Bool
+    /// The tooltip, when the state needs more than the label says.
+    var help: String?
 
     var body: some View {
         Toggle(isOn: $isOn) {
@@ -209,7 +206,7 @@ struct GlyphToggle: View {
         }
         .toggleStyle(.button)
         .buttonStyle(.borderless)
-        .help(label)
+        .help(help ?? label)
         .accessibilityLabel(label)
     }
 }

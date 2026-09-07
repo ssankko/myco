@@ -55,36 +55,43 @@ struct OutputRow: View {
 
     @ViewBuilder
     private var chain: some View {
-        HStack(spacing: 8) {
-            MeterSlider(
-                label: "\(entry.name) volume", value: gain, range: -60...12, step: 0.5,
-                readout: "\(Readout.decibels(settings.gainDB)) dB", readoutWidth: 58, reset: 0)
-            GlyphToggle(
-                label: "Monitor microphones on \(entry.name)", symbol: "ear",
-                isOn: binding(\.monitor),
-                help: isMonitorSilent ? "Turn a microphone on below to hear it." : nil)
-            Button { EQWindows.show(model: model, uid: entry.id) } label: {
-                Text("EQ")
-                    .font(.system(size: 11, weight: .medium))
-                    .glyphChrome(isOn: isEQActive)
-            }
-            .buttonStyle(.borderless)
-            .help("Equaliser for \(entry.name)")
-            .accessibilityLabel("Open the equaliser for \(entry.name)")
-            .accessibilityValue(isEQActive ? "active" : "flat")
-        }
-
-        if settings.monitor {
-            HStack(spacing: 6) {
-                Image(systemName: "ear")
-                    .font(.system(size: 9))
-                    .foregroundStyle(.tertiary)
-                    .frame(width: 12)
-                    .accessibilityHidden(true)
+        // A grid, so the monitor level below reads out in the same column as the volume above it.
+        Grid(alignment: .leading, horizontalSpacing: 8, verticalSpacing: 7) {
+            GridRow {
                 MeterSlider(
-                    label: "Monitor level on \(entry.name)", value: monitorGain, range: -60...12,
-                    step: 0.5, readout: "\(Readout.decibels(settings.monitorGainDB)) dB",
-                    readoutWidth: 58, reset: 0)
+                    label: "\(entry.name) volume", value: gain, range: -60...12, step: 0.5,
+                    readout: "\(Readout.decibels(settings.gainDB)) dB", readoutWidth: 58,
+                    reset: 0)
+                GlyphToggle(
+                    label: "Monitor microphones on \(entry.name)", symbol: "ear",
+                    isOn: binding(\.monitor),
+                    help: isMonitorSilent ? "Turn a microphone on below to hear it." : nil)
+                Button { EQWindows.show(model: model, uid: entry.id) } label: {
+                    Text("EQ")
+                        .font(.system(size: 11, weight: .medium))
+                        .glyphChrome(isOn: isEQActive)
+                }
+                .buttonStyle(.borderless)
+                .help("Equaliser for \(entry.name)")
+                .accessibilityLabel("Open the equaliser for \(entry.name)")
+                .accessibilityValue(isEQActive ? "active" : "flat")
+            }
+
+            if settings.monitor {
+                GridRow {
+                    HStack(spacing: 6) {
+                        Image(systemName: "ear")
+                            .font(.system(size: 9))
+                            .foregroundStyle(.tertiary)
+                            .frame(width: 12)
+                            .accessibilityHidden(true)
+                        MeterSlider(
+                            label: "Monitor level on \(entry.name)", value: monitorGain,
+                            range: -60...12, step: 0.5,
+                            readout: "\(Readout.decibels(settings.monitorGainDB)) dB",
+                            readoutWidth: 58, reset: 0)
+                    }
+                }
             }
         }
 

@@ -19,7 +19,13 @@ let package = Package(
             ]
         ),
         .target(name: "MixanimoAtomics"),
-        .executableTarget(name: "Mixanimo", dependencies: ["MixanimoAtomics"]),
-        .testTarget(name: "MixanimoTests", dependencies: ["Mixanimo"]),
+        .target(name: "MixanimoDSP", dependencies: ["MixanimoAtomics"]),
+        .target(name: "MixanimoEngine", dependencies: ["MixanimoDSP", "MixanimoAtomics"]),
+        .executableTarget(name: "Mixanimo", dependencies: ["MixanimoEngine", "MixanimoDSP"]),
+        // Signal measurements both test targets assert on.
+        .target(name: "MixanimoTestSupport", path: "Tests/MixanimoTestSupport"),
+        .testTarget(name: "MixanimoDSPTests", dependencies: ["MixanimoDSP", "MixanimoTestSupport"]),
+        .testTarget(
+            name: "MixanimoEngineTests", dependencies: ["MixanimoEngine", "MixanimoTestSupport"]),
     ]
 )

@@ -29,10 +29,12 @@ The plugin object exposes a custom property with the driver version so the app c
 
 Realtime rules inside the driver: no allocation, no locks, no unchecked indexing in `DoIOOperation`. Property access uses a single mutex outside the IO path.
 
-### Engine (Swift, `Sources/Mixanimo/Engine`)
+### Engine (Swift, `Sources/MixanimoEngine`)
 
 Runs in the app process on its own actor, so a device that takes its time to start or stop never holds the popover; the model carries a flag while nodes are stopped and started, and a change
 that only moves a parameter never raises it.
+
+The sample maths it calls, and the two atomic handoff types the IO threads read parameters through, live in `Sources/MixanimoDSP`. That target imports no CoreAudio and no UI, so its tests run on any machine with no device attached.
 
 A change to the outputs or the virtual rate rebuilds the whole graph. A change to the inputs, or to a monitor toggle, does not: every output carries a monitor tap with a fixed set of rings that the inputs are pointed at, and the monitor gain ramps between zero and the set level. Before any node stops, its gain ramps to zero and the engine waits for the ramp to play out; every new node starts silent and ramps in.
 
@@ -60,15 +62,15 @@ Sync: a global toggle. Off means every output delay is 0. On means each output d
 
 Lifecycle: on launch, remember the current default output and input, then pin to the virtual devices. On quit, restore them. On launch after a crash, the same logic applies because the driver already hid the devices when the app died.
 
-### App (SwiftUI, `Sources/Mixanimo/UI`)
+### App (SwiftUI, `Sources/Mixanimo`)
 
 Menu bar item with a popover, both plain AppKit windows; the app opens no SwiftUI scene window, because a window left on another space makes activation switch to that space. Popover contents: master slider, output list (row: enable toggle, name, transport icon, volume, buffer size, monitor toggle and gain, sync trim when sync is on, EQ button), input list (row: enable toggle, name, gain, mute), virtual rate picker, sync toggle, driver status with install/uninstall, settings (pin defaults, launch at login). EQ opens in its own window per output. Visual design follows the frontend-design skill.
 
-Settings persist in `UserDefaults`, keyed by device UID.
+Settings persist in `UserDefaults`, keyed by device UID. The app also watches the launch at login setting and registers or unregisters `SMAppService.mainApp`, which only the shipped bundle ID does.
 
 ### Build
 
-Swift package, four targets: `MixanimoDriver` (C, dynamic library), `MixanimoAtomics` (C headers carrying the shared feed layout and the memory orderings both sides use), `Mixanimo` (Swift executable), `MixanimoTests`. `scripts/bundle.sh` builds and assembles `Mixanimo.app` with `Mixanimo.driver` inside `Contents/Resources`. `Makefile` verbs: `build`, `install`, `uninstall`, `run`.
+Swift package, eight targets: `MixanimoDriver` (C, dynamic library), `MixanimoAtomics` (C headers carrying the shared feed layout and the memory orderings both sides use), `MixanimoDSP` (the sample maths, no CoreAudio), `MixanimoEngine` (the CoreAudio wrappers, the graph, the model and the driver installer), `Mixanimo` (the SwiftUI executable), and the tests `MixanimoDSPTests`, `MixanimoEngineTests` with the signal measurements both assert on in `MixanimoTestSupport`. `swift test --filter MixanimoDSPTests` needs no device and no microphone permission; the engine tests need both. `scripts/bundle.sh` builds and assembles `Mixanimo.app` with `Mixanimo.driver` inside `Contents/Resources`. `Makefile` verbs: `build`, `install`, `uninstall`, `run`.
 
 Install copies the driver to `/Library/Audio/Plug-Ins/HAL` and restarts coreaudiod, through one admin prompt (`osascript` with administrator privileges). Uninstall reverses it. The app offers both from the menu and also checks the driver version on launch.
 

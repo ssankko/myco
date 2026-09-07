@@ -38,6 +38,11 @@ struct AtomicCounter: @unchecked Sendable {
     func add(_ count: Int) {
         mixanimo_atomic_store_release(slot, mixanimo_atomic_load_relaxed(slot) &+ UInt64(count))
     }
+
+    /// Control thread only, for a count that is handed over rather than accumulated.
+    func set(_ value: Int) {
+        mixanimo_atomic_store_release(slot, UInt64(max(0, value)))
+    }
 }
 
 /// Frames one IO cycle carries, taken from the first buffer of the list.

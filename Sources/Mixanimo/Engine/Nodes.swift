@@ -27,43 +27,46 @@ func drop(
 /// resampled to the consumer's rate.
 ///
 /// Each input writes its own ring here, so every ring has one writer and one reader. The fill is
-/// held near one consumer block, which is the shortest the monitor path can run without gaps.
+/// held near one consumer block, which is the shortest the monitor path can run without gaps. The
+/// set of inputs changes while the consumer runs: `configure` publishes the new count and the
+/// render drains every ring and primes again when it sees it.
 struct MonitorTap: @unchecked Sendable {
+    /// Rings every tap carries, so an input can come and go without rebuilding the consumer.
+    static let maxInputs = 8
+
     struct State {
         var resampler: Resampler
         var fill: Double
         var primed: Bool
+        var inputs: Int
+        var primeLevel: Double
+        var drift: DriftController
     }
 
-    /// One ring per enabled input, in the engine's input order.
+    /// `maxInputs` rings, of which the first `configure`d count are live.
     let rings: UnsafeMutableBufferPointer<RingBuffer>
 
-    private let drift: DriftController
     private let baseRatio: Double
-    private let primeLevel: Double
+    private let pull: Double
     private let capacity: Int
     private let summed: UnsafeMutablePointer<Float>
     private let part: UnsafeMutablePointer<Float>
     private let state: UnsafeMutablePointer<State>
+    private let wantedInputs: AtomicCounter
+    private let wantedPrimeLevel: AtomicFloat
 
-    /// `rate` and `frames` describe the consumer's IO cycle; `producerFrames` is the largest block
-    /// an input writes at once, in mic mix frames.
-    init(inputs: Int, producerFrames: Int, rate: Double, frames: Int) {
+    /// `rate` and `frames` describe the consumer's IO cycle.
+    init(rate: Double, frames: Int) {
         baseRatio = micMixRate / rate
         let resampler = Resampler(
             channels: 1, ratio: baseRatio, maxDownsampleFactor: max(1, (baseRatio * 1.01).rounded(.up)))
         capacity = Int((Double(frames) * baseRatio * 1.01).rounded(.up)) + 2 * resampler.tapsPerSide + 8
-        // An input arrives one whole block at a time, so the ring waits for that much plus two pulls
-        // before it plays; anything less runs dry at the end of every input cycle.
-        let pull = Double(frames) * baseRatio + Double(resampler.tapsPerSide) + 1
-        primeLevel = Double(producerFrames) + 2 * pull
-        // The fill sweeps a whole input block between writes, so its average sits half a block below
-        // the level that started it; aiming there leaves the ratio at rest.
-        drift = DriftController(targetFillFrames: primeLevel - Double(producerFrames) / 2)
+        pull = Double(frames) * baseRatio + Double(resampler.tapsPerSide) + 1
 
-        rings = .allocate(capacity: inputs)
-        let ringFrames = nextPowerOfTwo(max(4 * (Int(primeLevel) + capacity), 2048))
-        for index in 0..<inputs {
+        rings = .allocate(capacity: MonitorTap.maxInputs)
+        // Room for the largest input block the HAL hands over, twice, on top of the priming level.
+        let ringFrames = nextPowerOfTwo(max(3 * 4096 + capacity, 2048))
+        for index in 0..<MonitorTap.maxInputs {
             rings[index] = RingBuffer(capacityFrames: ringFrames, channels: 1)
         }
         summed = .allocate(capacity: capacity)
@@ -71,7 +74,12 @@ struct MonitorTap: @unchecked Sendable {
         part = .allocate(capacity: capacity)
         part.initialize(repeating: 0, count: capacity)
         state = .allocate(capacity: 1)
-        state.initialize(to: State(resampler: resampler, fill: drift.targetFillFrames, primed: false))
+        state.initialize(
+            to: State(
+                resampler: resampler, fill: 0, primed: false, inputs: 0, primeLevel: 0,
+                drift: DriftController(targetFillFrames: 0)))
+        wantedInputs = AtomicCounter()
+        wantedPrimeLevel = AtomicFloat(0)
     }
 
     func deallocate() {
@@ -81,32 +89,65 @@ struct MonitorTap: @unchecked Sendable {
         state.deallocate()
         summed.deallocate()
         part.deallocate()
+        wantedInputs.deallocate()
+        wantedPrimeLevel.deallocate()
+    }
+
+    /// Control thread: the first `inputs` rings are live, and `producerFrames` is the largest block
+    /// an input writes at once, in mic mix frames.
+    func configure(inputs: Int, producerFrames: Int) {
+        // An input arrives one whole block at a time, so the ring waits for that much plus two pulls
+        // before it plays; anything less runs dry at the end of every input cycle.
+        wantedPrimeLevel.value = Float(Double(producerFrames) + 2 * pull)
+        wantedInputs.set(min(inputs, MonitorTap.maxInputs))
+    }
+
+    /// Throws away everything the rings hold and primes again on the next render. Audio thread
+    /// only; a consumer that does not want the mix still calls this so the rings never fill up.
+    func discard() {
+        for ring in rings { _ = drop(ring, above: 0, through: part, capacity: capacity) }
+        state.pointee.primed = false
     }
 
     /// Writes `frames` mono frames at the consumer's rate. False means the mix has not filled yet
     /// and the caller should stay silent. Audio thread only.
     func render(into destination: UnsafeMutablePointer<Float>, frames count: Int) -> Bool {
-        guard rings.count > 0, count > 0 else { return false }
+        guard count > 0 else { return false }
+        let inputs = wantedInputs.value
+        if inputs != state.pointee.inputs {
+            discard()
+            state.pointee.inputs = inputs
+            state.pointee.primeLevel = Double(wantedPrimeLevel.value)
+            // The fill sweeps a whole input block between writes, so its average sits half a block
+            // below the level that started it; aiming there leaves the ratio at rest.
+            state.pointee.drift.targetFillFrames =
+                max(0, state.pointee.primeLevel - (state.pointee.primeLevel - 2 * pull) / 2)
+        }
+        guard inputs > 0 else { return false }
+        let live = rings.prefix(inputs)
+        let primeLevel = state.pointee.primeLevel
+
         var fill = Int.max
-        for ring in rings { fill = min(fill, ring.fillLevel) }
+        for ring in live { fill = min(fill, ring.fillLevel) }
         if !state.pointee.primed {
             guard Double(fill) >= primeLevel else { return false }
             state.pointee.primed = true
             fill = Int.max
-            for ring in rings {
+            for ring in live {
                 fill = min(fill, drop(ring, above: Int(primeLevel), through: part, capacity: capacity))
             }
-            state.pointee.fill = drift.targetFillFrames
+            state.pointee.fill = state.pointee.drift.targetFillFrames
         }
 
         // The fill jumps by a whole producer block every cycle; the ratio follows its average, so
         // the correction tracks the clock difference instead of the block pattern.
         state.pointee.fill += fillSmoothing * (Double(fill) - state.pointee.fill)
-        state.pointee.resampler.ratio = baseRatio * drift.ratioMultiplier(fillFrames: state.pointee.fill)
+        state.pointee.resampler.ratio =
+            baseRatio * state.pointee.drift.ratioMultiplier(fillFrames: state.pointee.fill)
         let need = min(state.pointee.resampler.inputFramesNeeded(forOutput: count), capacity)
         var short = false
         var first = true
-        for ring in rings {
+        for ring in live {
             if first {
                 short = ring.read(into: summed, frames: need) < need
                 first = false
@@ -128,7 +169,7 @@ struct MonitorTap: @unchecked Sendable {
 
 /// One enabled physical output: its place in the driver's shared ring, the chain its IO callback
 /// runs and the handles the control thread pushes parameters through.
-@MainActor
+@EngineActor
 final class OutputNode {
     struct State {
         var resampler: Resampler
@@ -147,10 +188,13 @@ final class OutputNode {
     let latency: OutputLatency
     let eq: Equalizer
     let delay: DelayLine
-    let tap: MonitorTap?
+    let tap: MonitorTap
+    /// The tap's rings, for a test that watches them drain.
+    nonisolated var tapRings: UnsafeMutableBufferPointer<RingBuffer> { tap.rings }
 
     let gainTarget = AtomicFloat(1)
-    let monitorGainTarget = AtomicFloat(1)
+    /// Zero while the monitor is off; the ramp to and from it is what keeps a toggle silent.
+    let monitorGainTarget = AtomicFloat(0)
     let masterTarget = AtomicFloat(1)
     let underruns = AtomicCounter()
     /// Frames taken from the shared ring since the proc started.
@@ -164,7 +208,7 @@ final class OutputNode {
 
     init(
         uid: String, device: AudioDevice, settings: OutputSettings, virtualRate: Double,
-        feed: SharedFeed, inputs: Int, inputBlockFrames: Int
+        feed: SharedFeed
     ) throws {
         self.uid = uid
         self.device = device
@@ -196,11 +240,7 @@ final class OutputNode {
         eq = Equalizer(sampleRate: sampleRate, channels: 2)
         delay = DelayLine(
             maxDelayFrames: max(1024, Int(sampleRate / 2)), channels: 2, crossfadeFrames: 256)
-        tap = (settings.monitor && inputs > 0)
-            ? MonitorTap(
-                inputs: inputs, producerFrames: inputBlockFrames, rate: sampleRate,
-                frames: bufferFrames)
-            : nil
+        tap = MonitorTap(rate: sampleRate, frames: bufferFrames)
 
         feedScratch = .allocate(capacity: pull * 2)
         feedScratch.initialize(repeating: 0, count: pull * 2)
@@ -216,8 +256,9 @@ final class OutputNode {
                 drift: drift,
                 fill: drift.targetFillFrames,
                 gain: SmoothedGain(sampleRate: sampleRate, decibels: settings.gainDB),
-                monitorGain: SmoothedGain(sampleRate: sampleRate, decibels: settings.monitorGainDB),
-                master: SmoothedGain(sampleRate: sampleRate)))
+                monitorGain: SmoothedGain(sampleRate: sampleRate, decibels: silenceDecibels),
+                // Silent at first, so a proc that starts mid-waveform ramps in instead of clicking.
+                master: SmoothedGain(sampleRate: sampleRate, decibels: silenceDecibels)))
 
         nonisolated(unsafe) let state = self.state
         nonisolated(unsafe) let feedScratch = self.feedScratch
@@ -283,10 +324,13 @@ final class OutputNode {
                 mix.update(repeating: 0, count: count * 2)
             }
 
-            // The tap is drained every cycle, so its rings never fill up while the music pauses.
-            if let tap, tap.render(into: monitor, frames: count) {
+            // The tap is drained every cycle, so its rings never fill up while the music pauses or
+            // the monitor is off.
+            state.pointee.monitorGain.setTarget(linear: monitorGainTarget.value)
+            if state.pointee.monitorGain.target == 0 && state.pointee.monitorGain.current == 0 {
+                tap.discard()
+            } else if tap.render(into: monitor, frames: count) {
                 playing = true
-                state.pointee.monitorGain.setTarget(linear: monitorGainTarget.value)
                 state.pointee.monitorGain.apply(monitor, frames: count, channels: 1)
                 vDSP_vadd(mix, 2, monitor, 1, mix, 2, vDSP_Length(count))
                 vDSP_vadd(mix + 1, 2, monitor, 1, mix + 1, 2, vDSP_Length(count))
@@ -324,7 +368,7 @@ final class OutputNode {
 
     func stop() {
         proc = nil
-        tap?.deallocate()
+        tap.deallocate()
         state.pointee.resampler.deallocate()
         state.deallocate()
         eq.deallocate()
@@ -342,7 +386,7 @@ final class OutputNode {
 
 /// One enabled physical input: mono-summed, gained, resampled to the mic mix rate and written into
 /// one ring per consumer.
-@MainActor
+@EngineActor
 final class InputNode {
     struct State {
         var resampler: Resampler
@@ -380,7 +424,7 @@ final class InputNode {
         state.initialize(
             to: State(
                 resampler: resampler,
-                gain: SmoothedGain(sampleRate: rate, decibels: settings.muted ? silenceDecibels : settings.gainDB)))
+                gain: SmoothedGain(sampleRate: rate, decibels: silenceDecibels)))
 
         nonisolated(unsafe) let destinationsCopy = destinations
         nonisolated(unsafe) let mono = self.mono
@@ -415,7 +459,7 @@ final class InputNode {
 }
 
 /// Writes the mic mix into the `Mixanimo Mic` device, which is where other apps read it.
-@MainActor
+@EngineActor
 final class MicDrainNode {
     let tap: MonitorTap
 
@@ -426,8 +470,8 @@ final class MicDrainNode {
     init(device: AudioDevice, inputs: Int, inputBlockFrames: Int) throws {
         let cycleFrames = Int((try? device.bufferFrameSize) ?? 512)
         blockFrames = 2 * max(cycleFrames, 512)
-        tap = MonitorTap(
-            inputs: inputs, producerFrames: inputBlockFrames, rate: micMixRate, frames: cycleFrames)
+        tap = MonitorTap(rate: micMixRate, frames: cycleFrames)
+        tap.configure(inputs: inputs, producerFrames: inputBlockFrames)
         mono = .allocate(capacity: blockFrames)
         mono.initialize(repeating: 0, count: blockFrames)
 

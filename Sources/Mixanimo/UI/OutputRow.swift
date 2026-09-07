@@ -23,9 +23,6 @@ struct OutputRow: View {
         .rail(settings.enabled ? (status.isActive ? .live : .armed) : .off)
         .background(fill, in: .rect(cornerRadius: Theme.cardRadius))
         .onHover { isHovered = $0 }
-        .animation(.snappy(duration: 0.18), value: settings.enabled)
-        .animation(.snappy(duration: 0.18), value: settings.monitor)
-        .animation(.snappy(duration: 0.18), value: showsMore)
     }
 
     private var fill: Color {

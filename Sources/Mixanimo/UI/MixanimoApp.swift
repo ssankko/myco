@@ -90,6 +90,8 @@ final class StatusItem: NSObject {
     private let popover = NSPopover()
     /// Watches for clicks in other apps while the popover is open.
     private var outsideClicks: Any?
+    /// Watches for clicks in this app's other windows, and for Escape, while the popover is open.
+    private var localEvents: Any?
     private var becameActive: (any NSObjectProtocol)?
 
     private init(content: some View) {
@@ -97,7 +99,9 @@ final class StatusItem: NSObject {
         let host = NSHostingController(rootView: content)
         host.sizingOptions = [.preferredContentSize]
         popover.contentViewController = host
-        popover.behavior = .transient
+        // A transient popover closes when the app loses focus, which a space switch causes; the
+        // closing is done here instead, on any click outside the popover or on Escape.
+        popover.behavior = .applicationDefined
         // Every content size change is animated, and the animation re-anchors the window while it
         // resizes, so a row that opens makes the whole popover slide.
         popover.animates = false
@@ -123,18 +127,32 @@ final class StatusItem: NSObject {
             NSApplication.shared.activate()
         }
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-        popover.contentViewController?.view.window?.makeKey()
+        if let window = popover.contentViewController?.view.window {
+            // The popover stays with the user across a space switch, over a full-screen app too.
+            window.collectionBehavior.insert([.canJoinAllSpaces, .fullScreenAuxiliary])
+            window.makeKey()
+        }
         becameActive = NotificationCenter.default.addObserver(
             forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main
         ) { [weak self] _ in
             MainActor.assumeIsolated { self?.popover.contentViewController?.view.window?.makeKey() }
         }
-        // A transient popover closes on a click in its own app, so only a global monitor, which
-        // sees the clicks that land in other apps, covers the rest of the screen.
-        outsideClicks = NSEvent.addGlobalMonitorForEvents(
-            matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]
-        ) { [weak self] _ in
+        // The global monitor sees the clicks that land in other apps; the local one sees this
+        // app's own, and lets the ones inside the popover through.
+        let clicks: NSEvent.EventTypeMask = [.leftMouseDown, .rightMouseDown, .otherMouseDown]
+        outsideClicks = NSEvent.addGlobalMonitorForEvents(matching: clicks) { [weak self] _ in
             MainActor.assumeIsolated { self?.popover.performClose(nil) }
+        }
+        localEvents = NSEvent.addLocalMonitorForEvents(matching: clicks.union(.keyDown)) { [weak self] event in
+            let escape = event.type == .keyDown && event.keyCode == 53
+            let closes = MainActor.assumeIsolated { () -> Bool in
+                guard let self else { return false }
+                let inside = event.window == self.popover.contentViewController?.view.window
+                return escape || (event.type != .keyDown && !inside)
+            }
+            guard closes else { return event }
+            MainActor.assumeIsolated { self?.popover.performClose(nil) }
+            return escape ? nil : event
         }
     }
 }
@@ -143,6 +161,8 @@ extension StatusItem: NSPopoverDelegate {
     func popoverDidClose(_ notification: Notification) {
         if let outsideClicks { NSEvent.removeMonitor(outsideClicks) }
         outsideClicks = nil
+        if let localEvents { NSEvent.removeMonitor(localEvents) }
+        localEvents = nil
         if let becameActive { NotificationCenter.default.removeObserver(becameActive) }
         becameActive = nil
     }

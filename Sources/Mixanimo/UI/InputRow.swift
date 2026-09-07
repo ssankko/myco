@@ -46,7 +46,6 @@ struct InputRow: View {
         .rail(settings.enabled ? (settings.muted ? .armed : .live) : .off)
         .background(fill, in: .rect(cornerRadius: Theme.cardRadius))
         .onHover { isHovered = $0 }
-        .animation(.snappy(duration: 0.18), value: settings.enabled)
     }
 
     private var fill: Color {

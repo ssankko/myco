@@ -9,6 +9,7 @@ struct MycoApp: App {
     @State private var model: AppModel
     @State private var actions: Actions
     @State private var engine: Engine
+    @State private var updater: Updater
 
     init() {
         // Myco lives in the menu bar, so it takes no Dock tile and no main menu.
@@ -17,6 +18,8 @@ struct MycoApp: App {
         let actions = Actions()
         let engine = Engine(model: model)
         LaunchAtLogin.observe(model)
+        let updater = Updater()
+        updater.start()
         actions.install = { try? await engine.installDriver() }
         actions.uninstall = { try? await engine.uninstallDriver() }
         Task { await engine.start() }
@@ -24,7 +27,8 @@ struct MycoApp: App {
         _model = State(initialValue: model)
         _actions = State(initialValue: actions)
         _engine = State(initialValue: engine)
-        StatusItem.install(Popover(model: model, actions: actions))
+        _updater = State(initialValue: updater)
+        StatusItem.install(Popover(model: model, actions: actions, updater: updater))
     }
 
     var body: some Scene {

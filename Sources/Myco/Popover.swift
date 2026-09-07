@@ -7,6 +7,7 @@ import SwiftUI
 struct Popover: View {
     @Bindable var model: AppModel
     let actions: Actions
+    let updater: Updater
 
     /// The master position while the thumb is held. The engine answers through the driver, which
     /// takes a moment, and a slider that springs back mid-drag is unusable.
@@ -21,6 +22,13 @@ struct Popover: View {
             master
             if !model.driver.isReady {
                 DriverRow(status: model.driver, actions: actions)
+            }
+            if let release = updater.available {
+                NoticeRow(
+                    tint: Theme.signal, message: "Myco \(release.version) is out",
+                    actionTitle: "Update", isWorking: updater.isWorking
+                ) { updater.install() }
+                .accessibilityLabel("Update")
             }
             Divider().opacity(0.6)
             // A short list lets the popover grow to fit; a long one scrolls at a fixed height.
@@ -191,27 +199,44 @@ private struct DriverRow: View {
     let actions: Actions
 
     var body: some View {
+        NoticeRow(
+            tint: status.tint, message: status.message, actionTitle: status.actionTitle,
+            isWorking: actions.isWorking, isEnabled: actions.install != nil
+        ) { actions.run(actions.install) }
+        .accessibilityLabel("Driver")
+        .accessibilityValue(status.message)
+    }
+}
+
+/// A tinted line with one thing to do about it.
+private struct NoticeRow: View {
+    let tint: Color
+    let message: String
+    let actionTitle: String?
+    let isWorking: Bool
+    var isEnabled = true
+    let action: () -> Void
+
+    var body: some View {
         HStack(spacing: 8) {
-            Circle().fill(status.tint).frame(width: 6, height: 6)
-            Text(status.message)
+            Circle().fill(tint).frame(width: 6, height: 6)
+            Text(message)
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
                 .lineLimit(2)
             Spacer(minLength: 4)
-            if actions.isWorking {
+            if isWorking {
                 ProgressView().controlSize(.small).scaleEffect(0.7).frame(width: 16, height: 16)
-            } else if let title = status.actionTitle {
-                Button(title) { actions.run(actions.install) }
+            } else if let actionTitle {
+                Button(actionTitle, action: action)
                     .controlSize(.small)
-                    .disabled(actions.install == nil)
+                    .disabled(!isEnabled)
             }
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 6)
-        .background(status.isReady ? Color.clear : status.tint.opacity(0.12), in: .rect(cornerRadius: 7))
+        .background(tint.opacity(0.12), in: .rect(cornerRadius: 7))
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("Driver")
-        .accessibilityValue(status.message)
     }
 }
 

@@ -15,5 +15,5 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - run: APP_VERSION="${VERSION#v}" ./scripts/bundle.sh
-      - run: ditto -c -k --keepParent dist/Myco.app "Myco-${VERSION#v}.zip"
-      - run: gh release create "$VERSION" "Myco-${VERSION#v}.zip" --generate-notes
+      - run: ditto -c -k --keepParent dist/Myco.app Myco.zip
+      - run: gh release create "$VERSION" Myco.zip --generate-notes

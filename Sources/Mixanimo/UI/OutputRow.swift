@@ -6,8 +6,6 @@ struct OutputRow: View {
     let model: AppModel
     let entry: DeviceEntry
 
-    /// The buffer size, the sync trim and the measured latency, which are set once and then left.
-    @State private var showsMore = false
     @State private var isHovered = false
 
     private var settings: OutputSettings { model.output(entry.id) }
@@ -38,18 +36,20 @@ struct OutputRow: View {
                 .tint(Theme.signal)
                 .labelsHidden()
                 .accessibilityLabel("Play to \(entry.name)")
-            DeviceIcon(
-                name: entry.name, transport: entry.device.transportType, isOn: settings.enabled)
-            Text(entry.name)
-                .font(.system(size: 12, weight: .medium))
-                .lineLimit(1)
-                .truncationMode(.middle)
-                .foregroundStyle(settings.enabled ? .primary : .secondary)
+            HStack(spacing: 6) {
+                DeviceIcon(
+                    name: entry.name, transport: entry.device.transportType, isOn: settings.enabled)
+                Text(entry.name)
+                    .font(.system(size: 12, weight: .medium))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .foregroundStyle(settings.enabled ? .primary : .secondary)
+            }
+            .contentShape(.rect)
+            .onTapGesture { model.updateOutput(entry.id) { $0.enabled.toggle() } }
+            .accessibilityHidden(true)
             Spacer(minLength: 6)
             TransportTag(transport: entry.device.transportType)
-            if settings.enabled {
-                MoreToggle(label: "More settings for \(entry.name)", isOn: $showsMore)
-            }
         }
     }
 
@@ -58,18 +58,20 @@ struct OutputRow: View {
         HStack(spacing: 8) {
             MeterSlider(
                 label: "\(entry.name) volume", value: gain, range: -60...12, step: 0.5,
-                readout: "\(Readout.decibels(settings.gainDB)) dB", readoutWidth: 58)
+                readout: "\(Readout.decibels(settings.gainDB)) dB", readoutWidth: 58, reset: 0)
             GlyphToggle(
                 label: "Monitor microphones on \(entry.name)", symbol: "ear",
-                isOn: binding(\.monitor))
+                isOn: binding(\.monitor),
+                help: isMonitorSilent ? "Turn a microphone on below to hear it." : nil)
             Button { EQWindows.show(model: model, uid: entry.id) } label: {
                 Text("EQ")
                     .font(.system(size: 11, weight: .medium))
-                    .glyphChrome(tint: Theme.signal)
+                    .glyphChrome(isOn: isEQActive)
             }
             .buttonStyle(.borderless)
             .help("Equaliser for \(entry.name)")
             .accessibilityLabel("Open the equaliser for \(entry.name)")
+            .accessibilityValue(isEQActive ? "active" : "flat")
         }
 
         if settings.monitor {
@@ -82,34 +84,50 @@ struct OutputRow: View {
                 MeterSlider(
                     label: "Monitor level on \(entry.name)", value: monitorGain, range: -60...12,
                     step: 0.5, readout: "\(Readout.decibels(settings.monitorGainDB)) dB",
-                    readoutWidth: 58)
+                    readoutWidth: 58, reset: 0)
             }
         }
 
-        if showsMore { more }
+        details
     }
 
-    private var more: some View {
-        HStack(spacing: 8) {
-            bufferPicker
-            if model.settings.sync { syncTrim }
-            Spacer(minLength: 4)
+    /// What the user sets once and the numbers that say how it turned out.
+    private var details: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 8) {
+                bufferPicker
+                if model.settings.sync {
+                    syncTrim
+                    Text("\(Readout.milliseconds(status.delayMilliseconds)) ms delay")
+                        .font(.system(size: 10.5).monospacedDigit())
+                        .foregroundStyle(.tertiary)
+                        .accessibilityLabel(
+                            "Delay on \(entry.name), \(Readout.milliseconds(status.delayMilliseconds)) milliseconds")
+                }
+                Spacer(minLength: 4)
+            }
             statusLine
         }
     }
 
     private var bufferPicker: some View {
         Picker("Buffer", selection: binding(\.bufferFrames)) {
-            Text("Auto").tag(UInt32?.none)
+            Text("Auto (\(autoBufferFrames))").tag(UInt32?.none)
             ForEach([32, 64, 128, 256, 512, 1024, 2048] as [UInt32], id: \.self) { frames in
                 Text("\(frames)").tag(UInt32?(frames))
             }
         }
         .labelsHidden()
         .controlSize(.small)
-        .frame(width: 76)
+        .frame(width: 96)
         .help("Frames the device plays per cycle. Less is faster and needs more of the machine.")
         .accessibilityLabel("Buffer size for \(entry.name), in frames")
+    }
+
+    /// What Auto lands on, the same rule the engine applies: Bluetooth needs more frames.
+    private var autoBufferFrames: UInt32 {
+        let transport = entry.device.transportType
+        return transport == .bluetooth || transport == .bluetoothLE ? 256 : 128
     }
 
     private var syncTrim: some View {
@@ -128,9 +146,6 @@ struct OutputRow: View {
         HStack(spacing: 8) {
             if status.isActive {
                 Text("\(Readout.milliseconds(status.latencyMilliseconds)) ms out")
-                if status.delayMilliseconds > 0 {
-                    Text("\(Readout.milliseconds(status.delayMilliseconds)) ms delay")
-                }
                 if status.underruns > 0 {
                     Text("\(status.underruns) underruns").foregroundStyle(Theme.caution)
                 }
@@ -141,6 +156,16 @@ struct OutputRow: View {
         .font(.system(size: 10.5).monospacedDigit())
         .foregroundStyle(status.isActive ? AnyShapeStyle(.secondary) : AnyShapeStyle(.tertiary))
         .accessibilityElement(children: .combine)
+    }
+
+    /// The equaliser changes the sound: a live band with gain, or a shape that filters at any gain.
+    private var isEQActive: Bool {
+        settings.eq.contains { !$0.bypass && ($0.gainDB != 0 || !$0.type.isFlatAtZeroGain) }
+    }
+
+    /// The monitor is on and there is no microphone in the mix, so it carries nothing.
+    private var isMonitorSilent: Bool {
+        settings.monitor && !model.settings.inputs.values.contains(where: \.enabled)
     }
 
     private func binding<T>(_ key: WritableKeyPath<OutputSettings, T>) -> Binding<T> {
@@ -156,5 +181,15 @@ struct OutputRow: View {
         Binding(
             get: { Double(model.output(entry.id)[keyPath: key]) },
             set: { value in model.updateOutput(entry.id) { $0[keyPath: key] = Float(value) } })
+    }
+}
+
+private extension FilterType {
+    /// Passes the signal through untouched at 0 dB. The other shapes filter whatever the gain is.
+    var isFlatAtZeroGain: Bool {
+        switch self {
+        case .parametric, .lowShelf, .highShelf, .resonantLowShelf, .resonantHighShelf: true
+        default: false
+        }
     }
 }

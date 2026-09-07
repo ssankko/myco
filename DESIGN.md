@@ -31,7 +31,8 @@ Realtime rules inside the driver: no allocation, no locks, no unchecked indexing
 
 ### Engine (Swift, `Sources/Mixanimo/Engine`)
 
-Runs in the app process on its own actor, so a device that takes its time to start or stop never holds the popover; the model carries a flag while the graph catches up with a settings change.
+Runs in the app process on its own actor, so a device that takes its time to start or stop never holds the popover; the model carries a flag while nodes are stopped and started, and a change
+that only moves a parameter never raises it.
 
 A change to the outputs or the virtual rate rebuilds the whole graph. A change to the inputs, or to a monitor toggle, does not: every output carries a monitor tap with a fixed set of rings that the inputs are pointed at, and the monitor gain ramps between zero and the set level. Before any node stops, its gain ramps to zero and the engine waits for the ramp to play out; every new node starts silent and ramps in.
 
@@ -67,7 +68,7 @@ Settings persist in `UserDefaults`, keyed by device UID.
 
 ### Build
 
-Swift package, three targets: `MixanimoDriver` (C, dynamic library), `Mixanimo` (Swift executable), `MixanimoTests`. `scripts/bundle.sh` builds and assembles `Mixanimo.app` with `Mixanimo.driver` inside `Contents/Resources`. `Makefile` verbs: `build`, `install`, `uninstall`, `run`.
+Swift package, four targets: `MixanimoDriver` (C, dynamic library), `MixanimoAtomics` (C headers carrying the shared feed layout and the memory orderings both sides use), `Mixanimo` (Swift executable), `MixanimoTests`. `scripts/bundle.sh` builds and assembles `Mixanimo.app` with `Mixanimo.driver` inside `Contents/Resources`. `Makefile` verbs: `build`, `install`, `uninstall`, `run`.
 
 Install copies the driver to `/Library/Audio/Plug-Ins/HAL` and restarts coreaudiod, through one admin prompt (`osascript` with administrator privileges). Uninstall reverses it. The app offers both from the menu and also checks the driver version on launch.
 

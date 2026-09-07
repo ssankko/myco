@@ -11,6 +11,7 @@ let package = Package(
     targets: [
         .target(
             name: "MixanimoDriver",
+            dependencies: ["MixanimoAtomics"],
             exclude: ["Info.plist"],
             linkerSettings: [
                 .linkedFramework("CoreAudio"),

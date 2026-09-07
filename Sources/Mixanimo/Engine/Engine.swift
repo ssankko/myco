@@ -59,6 +59,21 @@ final class Engine {
         }
     }
 
+    /// Everything `makePlan` reads out of the settings. A change that leaves this alone moves a
+    /// parameter in the running graph and never queries the HAL.
+    private struct PlanInputs: Equatable {
+        var virtualRate: Double
+        /// Every enabled output and the buffer size it asks for.
+        var outputs: [String: UInt32?]
+        var inputs: Set<String>
+
+        init(_ settings: Settings) {
+            virtualRate = settings.virtualRate
+            outputs = settings.outputs.filter(\.value.enabled).mapValues(\.bufferFrames)
+            inputs = Set(settings.inputs.filter(\.value.enabled).keys)
+        }
+    }
+
     private let model: AppModel
     private let managesDefaults: Bool
     private let log = Logger(subsystem: AppModel.appBundleID, category: "engine")
@@ -71,6 +86,10 @@ final class Engine {
     private var master: Float = 1
     private var masterMuted = false
     private var plan = Plan()
+    /// What the current plan was made from; nil until the first one.
+    private var planInputs: PlanInputs?
+    /// The bands each output last took, so a move of another slider pushes no coefficients.
+    private var pushedEQ: [String: [BandSettings]] = [:]
     private var feed: SharedFeed?
     private(set) var outputs: [OutputNode] = []
     private var inputs: [InputNode] = []
@@ -135,6 +154,7 @@ final class Engine {
         feed?.unmap()
         feed = nil
         plan = Plan()
+        planInputs = nil
         outputStatus = [:]
         await publishStatus()
         if managesDefaults { defaultDevices.restore() }
@@ -152,8 +172,8 @@ final class Engine {
         try await DriverInstaller.uninstall()
     }
 
-    /// Every change to the settings is handed to the engine as a copy; the flag on the model tells
-    /// the popover that the graph is catching up.
+    /// Every change to the settings is handed to the engine as a copy, which decides how much of
+    /// the graph it touches.
     @MainActor
     private func observeSettings() {
         withObservationTracking {
@@ -162,9 +182,7 @@ final class Engine {
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 observeSettings()
-                model.isApplying = true
                 await apply(model.settings)
-                model.isApplying = false
             }
         }
     }
@@ -173,9 +191,9 @@ final class Engine {
         switch event {
         case .arrived, .departed:
             await publishDriver()
-            await apply(settings)
+            await apply(settings, replan: true)
         case .aliveChanged, .sampleRateChanged:
-            await apply(settings)
+            await apply(settings, replan: true)
         case .defaultChanged:
             if managesDefaults, settings.pinDefaults { defaultDevices.pin() }
         }
@@ -183,23 +201,41 @@ final class Engine {
 
     // MARK: Reconciliation
 
-    private func apply(_ wanted: Settings) async {
+    /// `replan` asks the HAL again for a device that arrived, went away or changed its rate; a
+    /// settings change plans anew only when it moves something the plan is made of.
+    private func apply(_ wanted: Settings, replan: Bool = false) async {
         guard running else { return }
         settings = wanted
         applyLaunchAtLogin()
-        await applyVirtualRate()
-        let next = makePlan()
-        if next.rebuildsOutputs(from: plan) {
-            await teardown()
-            plan = next
-            build()
-        } else if next.inputs != plan.inputs {
-            await teardownInputs()
-            plan = next
-            buildInputs()
+        let inputs = PlanInputs(wanted)
+        if replan || inputs != planInputs {
+            planInputs = inputs
+            await applyVirtualRate()
+            let next = makePlan()
+            if next.rebuildsOutputs(from: plan) {
+                await rebuilding {
+                    await teardown()
+                    plan = next
+                    build()
+                }
+            } else if next.inputs != plan.inputs {
+                await rebuilding {
+                    await teardownInputs()
+                    plan = next
+                    buildInputs()
+                }
+            }
         }
         pushParameters()
         await publishStatus()
+    }
+
+    /// Holds the flag the popover shows a spinner for while nodes are stopped and started. A
+    /// change that only moves a parameter never gets here, so a slider drag leaves it alone.
+    private func rebuilding(_ body: @EngineActor () async -> Void) async {
+        await MainActor.run { model.isApplying = true }
+        await body()
+        await MainActor.run { model.isApplying = false }
     }
 
     private var virtualDevice: AudioDevice? { (try? AudioDevice.find(uid: AppModel.outputDeviceUID)) ?? nil }
@@ -346,6 +382,7 @@ final class Engine {
         for output in outputs { output.stop() }
         outputs = []
         outputStatus = [:]
+        pushedEQ = [:]
         playing = []
     }
 
@@ -382,7 +419,10 @@ final class Engine {
             node.monitorGainTarget.value =
                 settings.monitor && !plan.inputs.isEmpty ? decibelsToLinear(settings.monitorGainDB) : 0
             node.masterTarget.value = master
-            if settings.eq.count == Equalizer.bandCount { node.eq.setBands(settings.eq) }
+            if settings.eq.count == Equalizer.bandCount, pushedEQ[node.uid] != settings.eq {
+                node.eq.setBands(settings.eq)
+                pushedEQ[node.uid] = settings.eq
+            }
         }
         for node in inputs {
             let settings = input(node.uid)

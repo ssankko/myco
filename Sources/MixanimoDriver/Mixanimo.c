@@ -2,6 +2,7 @@
 //  Loaded by coreaudiod from /Library/Audio/Plug-Ins/HAL/Mixanimo.driver.
 
 #include "MixanimoDriver.h"
+#include "MixanimoFeed.h"
 
 #include <CoreAudio/AudioServerPlugIn.h>
 #include <CoreAudio/AudioHardware.h>
@@ -48,14 +49,7 @@ enum
 
 //  The `Mixanimo` ring lives in a POSIX shared memory object that the app maps read only, so every
 //  physical output reads the mix straight out of it and nothing has to capture an input stream.
-#define kFeedName               "/mixanimo-feed"
-#define kFeedMagic              0x4D584644u     /* 'MXFD' */
-#define kFeedLayoutVersion      1u
-#define kFeedChannels           2u
-//  Power of two for the same masking, and 131072 frames are 1.4 seconds at 96 kHz.
-#define kFeedRingFrames         (1u << 17)
-//  The header owns a whole page, so the float data starts page aligned.
-#define kFeedHeaderBytes        4096u
+//  MixanimoFeed.h carries its layout, which the app reads through the same header.
 
 //  Sample frames between successive zero time stamps; the host rejects a period below 10923.
 #define kZeroTimeStampPeriod    16384u
@@ -69,29 +63,6 @@ static const Float64    kRatesOut[] = { 44100.0, 48000.0, 88200.0, 96000.0, 1764
 static const Float64    kRatesMic[] = { 48000.0 };
 
 #pragma mark - State
-
-//  What the app finds at the start of the shared object. The two groups sit on their own 64-byte
-//  line: the first is written when the driver loads or the rate changes, the second on every IO
-//  cycle. mMagic is stored last, so a reader that sees it sees a whole header.
-typedef struct
-{
-    _Atomic UInt32  mMagic;
-    UInt32          mLayoutVersion;
-    UInt32          mChannels;
-    UInt32          mRingFrames;
-    Float64         mSampleRate;
-    //  A fresh value per Initialize, which is how a reader notices that coreaudiod restarted.
-    UInt64          mGeneration;
-    UInt8           mDescriptionPad[64 - 32];
-
-    //  Frames written since the device last started. The release store publishes the samples.
-    _Atomic UInt64  mWriteFrame;
-    //  Frames the last IO cycle carried, which tells a reader how far behind to sit.
-    _Atomic UInt32  mWriteBlockFrames;
-    UInt8           mWritePad[64 - 12];
-} FeedHeader;
-
-_Static_assert(sizeof(FeedHeader) <= kFeedHeaderBytes, "the feed header must fit its page");
 
 //  One device description shared by both devices. Fields above mSampleRate never change.
 //  Everything below it is written only under gStateMutex; the fields the IO thread reads are
@@ -112,7 +83,7 @@ typedef struct
     AudioObjectPropertyScope    mDefaultScope;
     UInt32                      mRingFrames;
     //  The shared object for the device that publishes its ring, NULL for the other one.
-    FeedHeader*                 mFeed;
+    MixanimoFeedHeader*                 mFeed;
     //  Interleaved float ring of mRingFrames frames, NULL while the shared object is missing.
     Float32*                    mRing;
 
@@ -934,13 +905,11 @@ static void RingWrite(DeviceState* inDevice, UInt64 inStart, UInt32 inFrames, co
 
     //  The release store is the whole handshake with a reader in another process: whoever acquires
     //  this position sees every sample written above it.
-    FeedHeader* theFeed = inDevice->mFeed;
+    MixanimoFeedHeader* theFeed = inDevice->mFeed;
     if(theFeed != NULL)
     {
-        atomic_store_explicit(&theFeed->mWriteBlockFrames, inFrames, memory_order_relaxed);
-        atomic_store_explicit(&theFeed->mWriteFrame,
-                              atomic_load_explicit(&inDevice->mWriteEnd, memory_order_relaxed),
-                              memory_order_release);
+        mixanimo_feed_publish(theFeed, inFrames,
+                              atomic_load_explicit(&inDevice->mWriteEnd, memory_order_relaxed));
     }
 }
 
@@ -982,7 +951,7 @@ static void RingReset(DeviceState* inDevice)
     }
     if(inDevice->mFeed != NULL)
     {
-        atomic_store_explicit(&inDevice->mFeed->mWriteFrame, 0, memory_order_release);
+        mixanimo_feed_rewind(inDevice->mFeed);
     }
 }
 
@@ -1027,7 +996,7 @@ static void FeedCreate(DeviceState* inDevice)
         os_log_error(OS_LOG_DEFAULT, "Mixanimo: cannot lock %{public}s, errno %d", kFeedName, errno);
     }
 
-    FeedHeader* theFeed = (FeedHeader*)theMap;
+    MixanimoFeedHeader* theFeed = (MixanimoFeedHeader*)theMap;
     inDevice->mFeed = theFeed;
     inDevice->mRing = (Float32*)(((UInt8*)theMap) + kFeedHeaderBytes);
     RingReset(inDevice);
@@ -1037,8 +1006,9 @@ static void FeedCreate(DeviceState* inDevice)
     theFeed->mRingFrames = kFeedRingFrames;
     theFeed->mSampleRate = inDevice->mSampleRate;
     theFeed->mGeneration = mach_absolute_time();
-    atomic_store_explicit(&theFeed->mWriteBlockFrames, 0, memory_order_relaxed);
-    atomic_store_explicit(&theFeed->mMagic, kFeedMagic, memory_order_release);
+    theFeed->mWriteBlockFrames = 0;
+    //  Last, and with a release, so a reader that sees the magic sees everything above it.
+    mixanimo_feed_ready(theFeed);
 
     os_log(OS_LOG_DEFAULT, "Mixanimo: feed %{public}s ready, %zu bytes, generation %llu",
            kFeedName, theBytes, theFeed->mGeneration);

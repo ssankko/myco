@@ -13,32 +13,20 @@ struct SharedFeed: @unchecked Sendable {
         let description: String
     }
 
-    static let name = "/mixanimo-feed"
+    static let name = kFeedName
     /// 'MXFD', stored last by the driver, so a header carrying it is whole.
-    static let magic: UInt32 = 0x4D58_4644
-    static let layoutVersion: UInt32 = 1
+    static let magic = kFeedMagic
+    static let layoutVersion = kFeedLayoutVersion
     /// Bytes the header owns; the interleaved float ring starts right after them.
-    static let headerBytes = 4096
-
-    /// Byte offsets inside the header, which the driver's `FeedHeader` fixes.
-    private enum Field {
-        static let magic = 0
-        static let layoutVersion = 4
-        static let channels = 8
-        static let ringFrames = 12
-        static let sampleRate = 16
-        static let generation = 24
-        static let writeFrame = 64
-        static let writeBlockFrames = 72
-    }
+    static let headerBytes = Int(kFeedHeaderBytes)
 
     let channels: Int
     let ringFrames: Int
 
     private let base: UnsafeMutableRawPointer
     private let mapBytes: Int
+    private let header: UnsafePointer<MixanimoFeedHeader>
     private let data: UnsafePointer<Float>
-    private let writePosition: UnsafePointer<UInt64>
     private let mask: UInt64
 
     /// Maps the object the driver published. Throws when it is absent, too small, or carries a
@@ -69,14 +57,15 @@ struct SharedFeed: @unchecked Sendable {
 
     /// Takes over a mapping and checks the header against it.
     init(base: UnsafeMutableRawPointer, bytes: Int) throws {
-        let magic = base.load(fromByteOffset: Field.magic, as: UInt32.self)
-        let version = base.load(fromByteOffset: Field.layoutVersion, as: UInt32.self)
+        let header = UnsafePointer(base.assumingMemoryBound(to: MixanimoFeedHeader.self))
+        let magic = header.pointee.mMagic
+        let version = header.pointee.mLayoutVersion
         guard magic == SharedFeed.magic, version == SharedFeed.layoutVersion else {
             throw Failure(
                 description: "layout \(version) magic \(String(magic, radix: 16)) is not this build's")
         }
-        let channels = Int(base.load(fromByteOffset: Field.channels, as: UInt32.self))
-        let ringFrames = Int(base.load(fromByteOffset: Field.ringFrames, as: UInt32.self))
+        let channels = Int(header.pointee.mChannels)
+        let ringFrames = Int(header.pointee.mRingFrames)
         // Stereo is what the engine's chain carries, so another width is a layout it cannot read.
         guard channels == 2, ringFrames > 0, ringFrames & (ringFrames - 1) == 0,
             SharedFeed.headerBytes + ringFrames * channels * MemoryLayout<Float>.size <= bytes
@@ -86,13 +75,12 @@ struct SharedFeed: @unchecked Sendable {
 
         self.base = base
         self.mapBytes = bytes
+        self.header = header
         self.channels = channels
         self.ringFrames = ringFrames
         self.mask = UInt64(ringFrames - 1)
         self.data = UnsafePointer(
             (base + SharedFeed.headerBytes).assumingMemoryBound(to: Float.self))
-        self.writePosition = UnsafePointer(
-            (base + Field.writeFrame).assumingMemoryBound(to: UInt64.self))
 
         // An IO callback must not take a page fault, so the whole mapping is made resident now.
         if mlock(base, bytes) != 0 { madvise(base, bytes, MADV_WILLNEED) }
@@ -105,19 +93,17 @@ struct SharedFeed: @unchecked Sendable {
     }
 
     /// The rate the samples in the ring were written at.
-    var sampleRate: Double { base.load(fromByteOffset: Field.sampleRate, as: Double.self) }
+    var sampleRate: Double { header.pointee.mSampleRate }
 
     /// Changes when coreaudiod loads the driver again, which is a reader's cue to start over.
-    var generation: UInt64 { base.load(fromByteOffset: Field.generation, as: UInt64.self) }
+    var generation: UInt64 { header.pointee.mGeneration }
 
     /// Frames the driver has written since the device last started. Acquire: everything below it is
     /// visible once this is read.
-    var writeFrame: UInt64 { mixanimo_atomic_load_acquire(writePosition) }
+    var writeFrame: UInt64 { mixanimo_feed_write_frame(header) }
 
     /// Frames the driver's last IO cycle carried, that is how far a reader has to sit behind it.
-    var writeBlockFrames: Int {
-        Int(base.load(fromByteOffset: Field.writeBlockFrames, as: UInt32.self))
-    }
+    var writeBlockFrames: Int { Int(header.pointee.mWriteBlockFrames) }
 
     /// Copies interleaved frames starting at a free-running position, wrapping at the end of the
     /// ring. Nothing checks that the driver still has them; the caller's fill level does that.

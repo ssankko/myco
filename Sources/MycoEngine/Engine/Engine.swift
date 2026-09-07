@@ -81,9 +81,10 @@ package final class Engine {
     private let model: AppModel
     private let managesDefaults: Bool
     private let log = Logger(subsystem: AppModel.appBundleID, category: "engine")
-    /// Thread-safe by contract, which the SDK does not spell out.
-    nonisolated(unsafe) private let defaultsStore: UserDefaults
-    lazy var defaultDevices = DefaultDevices(store: defaultsStore)
+    /// UserDefaults is thread-safe by contract, which the SDK does not spell out.
+    private struct DefaultsStore: @unchecked Sendable { let defaults: UserDefaults }
+    private let defaultsStore: DefaultsStore
+    lazy var defaultDevices = DefaultDevices(store: defaultsStore.defaults)
 
     private var running = false
     private var settings = Settings()
@@ -110,7 +111,7 @@ package final class Engine {
     package nonisolated init(model: AppModel, managesDefaults: Bool = true, defaultsStore: UserDefaults = .standard) {
         self.model = model
         self.managesDefaults = managesDefaults
-        self.defaultsStore = defaultsStore
+        self.defaultsStore = DefaultsStore(defaults: defaultsStore)
     }
 
     // MARK: Lifecycle
@@ -185,8 +186,8 @@ package final class Engine {
         } onChange: { [weak self] in
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                observeSettings()
-                await apply(model.settings)
+                self.observeSettings()
+                await self.apply(self.model.settings)
             }
         }
     }

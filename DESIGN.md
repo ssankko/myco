@@ -1,86 +1,52 @@
-# Myco
+# Myco design guide
 
-A macOS menu bar app that plays one audio stream to many output devices at the same time, each with its own volume, delay, buffer size and EQ, and that mixes many microphones into one input device. Built for gaming under CrossOver (Wine), where the game must never see a device change.
+How the app looks and behaves on screen. `ARCHITECTURE.md` covers what is under it.
 
-## Why not an aggregate device
+## Brand
 
-An aggregate device is a thin wrapper over real hardware. Its sample rate follows the clock master, every subdevice must run at that rate, and when a Bluetooth subdevice drops the aggregate is rebuilt. Wine's CoreAudio backend holds the device it opened, so a rebuild leaves the game talking to a dead stream. That is the crackle, the silent headphones after reconnect, and the sample rate reset that PolySound shows.
+- Pale mint `#C5F4D4` on deep forest `#173B30`. `Theme.brandMint` and `Theme.brandForest` carry them in code.
+- The mark is the glyph in `Sources/Myco/Myco.svg`: fused sound bars, one shape. The app icon puts it in mint on a forest tile that fills 80% of the canvas. The menu bar and the popover header draw it as a template image, so it takes the colour of the text around it.
 
-Myco instead publishes two virtual devices through its own HAL driver. They never disappear while the app runs and their rate never changes under a client. Hot swap of physical devices happens inside the app's engine, where the game cannot see it.
+## Colour
 
-## Components
+Every colour has a light and a dark value and lives in `Sources/Myco/Theme.swift`. Views never name a colour of their own.
 
-### Driver (C, `Sources/MycoDriver`)
+| Name | Meaning | Light | Dark |
+|---|---|---|---|
+| `signal` | Audio flows here. The one accent; every control that carries audio uses it. | `(0.24, 0.31, 0.80)` | `(0.51, 0.57, 1.00)` |
+| `caution` | Works, but look: underruns, an old driver. | `(0.72, 0.47, 0.06)` | `(0.95, 0.70, 0.25)` |
+| `stopped` | Nothing flows: no driver, a dead device. | `(0.76, 0.25, 0.24)` | `(1.00, 0.45, 0.42)` |
+| `danger` | A control that takes something away. Same red as `stopped`. | | |
 
-An AudioServerPlugIn loaded by coreaudiod from `/Library/Audio/Plug-Ins/HAL/Myco.driver`. Pure C, written from scratch against `CoreAudio/AudioServerPlugIn.h`. MIT.
+Everything else is `primary` at an opacity: `track` 0.11 for rails and dividers, `border` 0.22 around a small button, `rowFillHover` 0.06 under the pointer. A device that carries audio sits on `signal` at 0.08, lifted to 0.15 under the pointer.
 
-Publishes two devices:
+## Type
 
-- `Myco` output only, stereo, float32. Nominal rate selectable from 44100, 48000, 88200, 96000, 176400, 192000. Exposes a volume control on the output scope so the Mac's volume keys, menu bar slider and HUD act on it.
-- `Myco Mic` input, mono, float32, fixed 48000.
+The system font only. Sizes in points:
 
-`Myco` publishes its ring in a POSIX shared memory object, `/myco-feed`, mode 0644 with the driver as the only writer. A page of header (magic `MXFD`, layout version, channels, ring frames, sample rate, a generation raised at every load, the write position and the last IO block size) is followed by 131072 interleaved stereo float frames. Clients write into the ring; the first writer of a span overwrites it and clears the gap the last one left, later writers in the same span add, so several games mix. The write position is published with a release store, which is the whole handshake with the app. The app maps the object read only and every physical output reads it directly, so nothing captures an input stream and macOS shows no microphone indicator.
+| Size | Use |
+|---|---|
+| 17 medium | The master readout |
+| 13 semibold | The popover title |
+| 12 | Section headings, the EQ window |
+| 11 | Device names and controls |
+| 10.5 | Captions, readouts, tooltips-in-place such as "Bluetooth" |
+| 9 to 9.5 | Chips and tags |
 
-`Myco Mic` stays a loopback ring inside the driver: the app writes it and clients read it back through its input stream. The driver's clock is the host clock (`mach_absolute_time`).
+Readouts are fixed width, fixed sign and fixed decimals, so a column of numbers scans without the digits jumping: `+0.0 dB`, `144.8 ms`, `88.2 kHz`. `Readout` in `Theme.swift` formats them.
 
-Both devices report `kAudioDevicePropertyIsHidden = true` until a client whose bundle ID is the Myco app attaches (`AddDeviceClient`). The host attaches every process that holds a connection to CoreAudio, so the app's property listeners are enough and it needs no IO proc for this. They hide again when that client detaches (`RemoveDeviceClient`). A crash of the app detaches it, so the devices are never visible without the app.
+## Layout
 
-The plugin object exposes a custom property with the driver version so the app can detect a stale driver.
+- The popover is 380 points wide, pinned to the top, and grows downward. Nothing animates when a row appears or changes size.
+- Rows are 10 points apart, sections 14. A card has a radius of 8 and a padding of 8, with a `signal` bar down its left edge while it plays.
+- A glyph button is 19 points high with a radius of 5, bordered in `border`, filled with `signal` and white on top while it is on.
+- The details of an output sit on one row: buffer picker, then sync trim and computed delay when outputs are aligned, then the latency and underrun readouts pushed right. They wrap under the controls only when they do not fit.
 
-Realtime rules inside the driver: no allocation, no locks, no unchecked indexing in `DoIOOperation`. Property access uses a single mutex outside the IO path.
+## Rules
 
-### Engine (Swift, `Sources/MycoEngine`)
-
-Runs in the app process on its own actor, so a device that takes its time to start or stop never holds the popover; the model carries a flag while nodes are stopped and started, and a change
-that only moves a parameter never raises it.
-
-The sample maths it calls, and the two atomic handoff types the IO threads read parameters through, live in `Sources/MycoDSP`. That target imports no CoreAudio and no UI, so its tests run on any machine with no device attached.
-
-Only the outputs whose device, sample rate or buffer size changed are stopped and built again, and a change to the virtual rate replaces every one of them, because each output's resampler is built against that rate. A change to the inputs, or to a monitor toggle, stops no output; the inputs are rebuilt under the running outputs, as they also are whenever the set of outputs changes, because every output carries a monitor tap with a fixed set of rings that the inputs are pointed at, and the monitor gain ramps between zero and the set level. Before any node stops, its gain ramps to zero and the engine waits for the ramp to play out; every new node starts silent and ramps in.
-
-Output path:
-
-1. `SharedFeed` maps `/myco-feed` read only once and checks the magic and the layout version. An object that is missing, or one this build cannot read, is reported as an outdated driver and no output starts. There is no IO callback on the `Myco` device at all.
-2. Each enabled physical output has its own IO callback at its own buffer size (`kAudioDevicePropertyBufferFrameSize`, clamped to the device's reported range). Defaults: 256 frames for Bluetooth transport, 128 otherwise.
-3. Per output, in order: its own reading position in the shared ring, held the driver's last IO block plus two of its own pulls behind the driver's write position, resampler from the virtual rate to the device's current nominal rate (the device's rate is never changed by Myco), drift correction by nudging the resample ratio from the distance to the write position, optional mic monitor summed in, ten-band EQ (biquads via Accelerate `vDSP_biquad`, RBJ coefficients, filter types matching Apple's EQ unit), delay line, per-output gain, master gain.
-4. Master gain mirrors the driver's volume control both ways.
-
-An output whose read position catches up with the driver's plays silence, freezes its drift correction and waits; when the write position moves again it takes a fresh position behind it. A changed generation, which is what a coreaudiod restart leaves behind, does the same. A header sample rate that no longer matches rebuilds the graph, as a virtual rate change already does.
-
-Input path:
-
-1. Each enabled physical input has its own IO callback. Per input: gain, mute.
-2. All enabled inputs are resampled to 48000 and summed into the mic mix.
-3. The mix is written into `Myco Mic` for other apps.
-4. Every output reads the same mix through a direct ring at its own buffer size, not through the driver, so the wired path stays at a few milliseconds; with monitor off the ring is drained and dropped. The monitor plays whether or not anything plays into the virtual device.
-
-Hot swap: the engine listens for `kAudioHardwarePropertyDevices`. A device whose UID has saved settings resumes with them. A device seen for the first time is listed off. Built-in speakers are never enabled automatically.
-
-Pinning: while running and with the toggle on, the engine listens for default output and default input changes and sets them back to the virtual devices.
-
-Sync: a global toggle. Off means every output delay is 0. On means each output delay is the largest reported output latency (`kAudioDevicePropertyLatency` + `kAudioDevicePropertySafetyOffset` + stream latency + buffer size + the target fill it holds in the shared ring) among enabled outputs minus its own, plus a per-output manual trim in milliseconds.
-
-Lifecycle: on launch, remember the current default output and input, then pin to the virtual devices. On quit, restore them. On launch after a crash, the same logic applies because the driver already hid the devices when the app died.
-
-### App (SwiftUI, `Sources/Myco`)
-
-Menu bar item with a popover, both plain AppKit windows; the app opens no SwiftUI scene window, because a window left on another space makes activation switch to that space. Popover contents: master slider, output list (row: enable toggle, name, transport icon, volume, buffer size, monitor toggle and gain, sync trim when sync is on, EQ button), input list (row: enable toggle, name, gain, mute), virtual rate picker, sync toggle, driver status with install/uninstall, settings (pin defaults, launch at login). EQ opens in its own window per output. Visual design follows the frontend-design skill.
-
-Settings persist in `UserDefaults`, keyed by device UID. The app also watches the launch at login setting and registers or unregisters `SMAppService.mainApp`, which only the shipped bundle ID does.
-
-### Build
-
-Swift package, eight targets: `MycoDriver` (C, dynamic library), `MycoAtomics` (C headers carrying the shared feed layout and the memory orderings both sides use), `MycoDSP` (the sample maths, no CoreAudio), `MycoEngine` (the CoreAudio wrappers, the graph, the model and the driver installer), `Myco` (the SwiftUI executable), and the tests `MycoDSPTests`, `MycoEngineTests` with the signal measurements both assert on in `MycoTestSupport`. `swift test --filter MycoDSPTests` needs no device and no microphone permission; the engine tests need both. `scripts/bundle.sh` builds and assembles `Myco.app` with `Myco.driver` inside `Contents/Resources`. `Makefile` verbs: `build`, `install`, `uninstall`, `run`.
-
-Install copies the driver to `/Library/Audio/Plug-Ins/HAL` and restarts coreaudiod, through one admin prompt (`osascript` with administrator privileges). Uninstall reverses it. The app offers both from the menu and also checks the driver version on launch.
-
-Ad-hoc code signing only. Releases on GitHub are unsigned; the README states the `xattr -dr com.apple.quarantine` step.
-
-Deployment target macOS 14. Swift 6. No third-party packages.
-
-## Non-goals
-
-- Per-listener keyboard hotkeys.
-- A monitor matrix (which mic goes to which output). Monitor is on or off per output and carries the whole mic mix.
-- Intercepting media keys.
-- Notarisation.
+- No explanatory text inside a row. A row is a name, its controls and its readouts. Anything that needs a sentence goes into a tooltip.
+- A lit control means an active state, not an available one. EQ lights up only when its curve is not flat; the ear lights up only while a microphone is monitored.
+- Clicking a device's name toggles it. Double-clicking a slider's readout resets it. Both are tooltips, not labels.
+- The spinner in the header shows only while nodes really stop and start. A slider drag never shows it.
+- A control that removes something is `danger` text, borderless, never the accent.
+- Numbers the user cannot act on stay out. Underruns show only when they are above zero.

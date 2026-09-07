@@ -1,18 +1,9 @@
 #!/bin/bash
 #  Builds the package and assembles dist/Myco.driver and dist/Myco.app.
-#  APP_VERSION is the version the app bundle reports. CODESIGN_IDENTITY names the certificate to
-#  sign with; unset, both bundles get an ad hoc signature, which is enough to run on this machine.
+#  APP_VERSION is the version the app bundle reports. Both bundles get an ad hoc signature.
 set -euo pipefail
 
 APP_VERSION="${APP_VERSION:-0.1.0}"
-CODESIGN_IDENTITY="${CODESIGN_IDENTITY:-}"
-sign() {
-	if [ -n "$CODESIGN_IDENTITY" ]; then
-		codesign --force --sign "$CODESIGN_IDENTITY" --options runtime --timestamp "$@"
-	else
-		codesign --force --sign - "$@"
-	fi
-}
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD="$ROOT/.build/release"
@@ -54,7 +45,7 @@ for SIZE in 16 32 128 256 512; do
 	sips -z "$((SIZE * 2))" "$((SIZE * 2))" "$ICONSET/../Myco.svg.png" --out "$ICONSET/icon_${SIZE}x${SIZE}@2x.png" > /dev/null
 done
 iconutil -c icns "$ICONSET" -o "$DRIVER/Contents/Resources/Myco.icns"
-sign "$DRIVER"
+codesign --force --sign - "$DRIVER"
 
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BUILD/Myco" "$APP/Contents/MacOS/Myco"
@@ -91,6 +82,6 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 cp -R "$DRIVER" "$APP/Contents/Resources/Myco.driver"
-sign --entitlements "$ROOT/Sources/Myco/Myco.entitlements" "$APP"
+codesign --force --sign - "$APP"
 
 echo "built $DRIVER and $APP"

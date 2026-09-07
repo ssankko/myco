@@ -1,67 +1,62 @@
+<div align="center">
+
+<img src="Sources/Myco/Myco.svg" width="144" height="144" alt="Myco">
+
 # Myco
 
-<img src="Sources/Myco/Myco.svg" width="64" align="right" alt="">
+**One audio stream to every speaker, every microphone into one input**
 
-A macOS menu bar app that plays one audio stream to many output devices at once and mixes many microphones into one input device.
+[![CI](https://github.com/ssankko/myco/actions/workflows/ci.yml/badge.svg)](https://github.com/ssankko/myco/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/tag/ssankko/myco?label=release&color=c5f4d4)](https://github.com/ssankko/myco/releases)
+[![License](https://img.shields.io/badge/license-MIT-173b30)](LICENSE)
+![Platform](https://img.shields.io/badge/platform-macOS-111?logo=apple&logoColor=white)
 
-Each output has its own volume, delay, buffer size and ten-band EQ. Outputs come and go without the playing app noticing, because the app publishes two virtual devices through its own audio driver and does the routing itself. It was built for gaming under CrossOver, where a device change under the game means crackle or silence, but it works with any app.
+<p align="center">
+  <img src="docs/popover.png" width="452" alt="The Myco popover: a master slider, an output card with volume, buffer, latency and EQ, and the list of microphones">
+</p>
 
-<p align="center"><img src="docs/popover.png" width="406" alt="The Myco popover, with one output card and the microphone list"></p>
+</div>
+
+## What can it do?
+
+Myco is a menu bar app that plays whatever macOS plays to several output devices at the same time, and mixes several microphones into one input device. Each output has its own volume, delay, buffer size and ten-band EQ.
+
+I made it for gaming under CrossOver with AirPods and speakers on at once. Every app I tried did this with an aggregate device, and an aggregate device is rebuilt whenever a Bluetooth device drops, which leaves the game talking to a dead stream. Myco publishes two virtual devices through its own audio driver and does the routing itself, so the devices never disappear and the game never notices a change.
+
+## Features
+
+- **Many outputs at once.** Turn on any set of devices; each gets a volume, a delay, a buffer size and an EQ of its own.
+- **Aligned outputs.** One switch delays every output to the slowest one, so speakers and headphones stay in time.
+- **One microphone from many.** Turn on the microphones you want, set each gain, and every app sees one input device.
+- **Monitoring.** Hear a microphone in any output, with its own level.
+- **Nothing changes under the apps.** The virtual devices keep their rate and their identity while physical devices come and go.
 
 ## Install
 
 Requires macOS 14 or later.
 
-1. Download the latest `Myco-x.y.z.zip` from [Releases](https://github.com/ssankko/myco/releases), unzip it and move `Myco.app` to `/Applications`.
-2. Open it. Myco lives in the menu bar; there is no Dock tile.
-3. Click **Install** in the popover. macOS asks for an administrator password because the driver goes into `/Library/Audio/Plug-Ins/HAL`. The audio system restarts once.
-4. Turn on the outputs you want to hear. Myco makes itself the system output and, if you turn on a microphone, the system input.
+1. Download `Myco-x.y.z.zip` from [Releases](https://github.com/ssankko/myco/releases), unzip it and move `Myco.app` to `/Applications`.
+2. The download is not notarized, so remove the quarantine flag once:
+   ```
+   xattr -dr com.apple.quarantine /Applications/Myco.app
+   ```
+3. Open Myco from the menu bar and click **Install**. macOS asks for an administrator password because the driver goes into `/Library/Audio/Plug-Ins/HAL`.
+4. Turn on the outputs you want to hear.
 
-Remove the driver with **Remove driver** at the bottom of the popover, then delete the app.
+**Remove driver** at the bottom of the popover takes the driver out again.
 
-If macOS says the app is damaged, the download was not notarized. Run this once:
+## Build
 
-```
-xattr -dr com.apple.quarantine /Applications/Myco.app
-```
-
-## Build from source
-
-Requires Xcode 16 or later. There is no Xcode project; the package builds from the command line.
+Requires Xcode 16 or later. There is no Xcode project.
 
 ```
-make build     # dist/Myco.app with the driver inside
-make install   # copies the driver into /Library/Audio/Plug-Ins/HAL (administrator prompt)
-make run
-make uninstall
+make build          # dist/Myco.app with the driver inside
+make install        # copies the driver into place (administrator prompt)
+swift test --filter MycoDSPTests   # the sample maths, no hardware needed
+make test-capture   # everything; needs the driver installed and a microphone
 ```
 
-A build from source is signed ad hoc, which runs on the machine that built it.
-
-## Tests
-
-```
-swift test --filter MycoDSPTests   # the sample maths; needs no device
-make test-capture                  # everything; needs the driver installed and a microphone
-```
-
-The engine tests play tones through the driver and read them back. They run in a Terminal.app window because that is where the microphone permission lives. Quit Myco before running them.
-
-## How it works
-
-[DESIGN.md](DESIGN.md) describes the driver, the shared-memory feed, the engine graph and the reasons behind them.
-
-## Releasing
-
-A tag `vX.Y.Z` builds, signs, notarizes and publishes `Myco-X.Y.Z.zip` through the release workflow. The repository needs five secrets:
-
-| Secret | Value |
-|---|---|
-| `DEVELOPER_ID_P12` | A "Developer ID Application" certificate with its private key, exported as `.p12` and base64 encoded |
-| `DEVELOPER_ID_P12_PASSWORD` | The password of that export |
-| `NOTARY_KEY_P8` | An App Store Connect API key (`.p8`), Developer role or higher |
-| `NOTARY_KEY_ID` | Its key ID |
-| `NOTARY_ISSUER_ID` | The issuer ID shown next to the key |
+[ARCHITECTURE.md](ARCHITECTURE.md) explains the driver, the shared-memory feed and the engine. [DESIGN.md](DESIGN.md) is the visual design guide.
 
 ## License
 

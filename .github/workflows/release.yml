@@ -13,7 +13,7 @@ jobs:
       VERSION: ${{ github.ref_name }}
       GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - run: APP_VERSION="${VERSION#v}" ./scripts/bundle.sh
       - run: ditto -c -k --keepParent dist/Myco.app "Myco-${VERSION#v}.zip"
       - run: gh release create "$VERSION" "Myco-${VERSION#v}.zip" --generate-notes

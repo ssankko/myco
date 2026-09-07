@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 96 96" fill="#171A19">
+  <title>Myco: fused sound bars</title>
+  <rect x="11" y="39" width="9" height="18" rx="4.5"/>
+  <path d="M27 31Q27 26 32 26Q37 26 37 31V36C37 42 43 42 43 36V21Q43 16 48 16Q53 16 53 21V38C53 44 59 44 59 38V35Q59 30 64 30Q69 30 69 35V61Q69 66 64 66Q59 66 59 61V58C59 52 53 52 53 58V75Q53 80 48 80Q43 80 43 75V60C43 54 37 54 37 60V65Q37 70 32 70Q27 70 27 65Z"/>
+  <rect x="76" y="39" width="9" height="18" rx="4.5"/>
+</svg>

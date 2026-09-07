@@ -2,30 +2,31 @@
 import PackageDescription
 
 let package = Package(
-    name: "Mixanimo",
+    name: "Myco",
     platforms: [.macOS(.v14)],
     products: [
-        .library(name: "MixanimoDriver", type: .dynamic, targets: ["MixanimoDriver"]),
-        .executable(name: "Mixanimo", targets: ["Mixanimo"]),
+        .library(name: "MycoDriver", type: .dynamic, targets: ["MycoDriver"]),
+        .executable(name: "Myco", targets: ["Myco"]),
     ],
     targets: [
         .target(
-            name: "MixanimoDriver",
-            dependencies: ["MixanimoAtomics"],
+            name: "MycoDriver",
+            dependencies: ["MycoAtomics"],
             exclude: ["Info.plist"],
             linkerSettings: [
                 .linkedFramework("CoreAudio"),
                 .linkedFramework("CoreFoundation"),
             ]
         ),
-        .target(name: "MixanimoAtomics"),
-        .target(name: "MixanimoDSP", dependencies: ["MixanimoAtomics"]),
-        .target(name: "MixanimoEngine", dependencies: ["MixanimoDSP", "MixanimoAtomics"]),
-        .executableTarget(name: "Mixanimo", dependencies: ["MixanimoEngine", "MixanimoDSP"]),
+        .target(name: "MycoAtomics"),
+        .target(name: "MycoDSP", dependencies: ["MycoAtomics"]),
+        .target(name: "MycoEngine", dependencies: ["MycoDSP", "MycoAtomics"]),
+        .executableTarget(
+            name: "Myco", dependencies: ["MycoEngine", "MycoDSP"], resources: [.copy("Myco.svg")]),
         // Signal measurements both test targets assert on.
-        .target(name: "MixanimoTestSupport", path: "Tests/MixanimoTestSupport"),
-        .testTarget(name: "MixanimoDSPTests", dependencies: ["MixanimoDSP", "MixanimoTestSupport"]),
+        .target(name: "MycoTestSupport", path: "Tests/MycoTestSupport"),
+        .testTarget(name: "MycoDSPTests", dependencies: ["MycoDSP", "MycoTestSupport"]),
         .testTarget(
-            name: "MixanimoEngineTests", dependencies: ["MixanimoEngine", "MixanimoTestSupport"]),
+            name: "MycoEngineTests", dependencies: ["MycoEngine", "MycoTestSupport"]),
     ]
 )

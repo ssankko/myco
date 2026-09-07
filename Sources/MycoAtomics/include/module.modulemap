@@ -1,0 +1,6 @@
+//  Both headers belong to the module. Without this map SwiftPM takes MycoAtomics.h alone as
+//  the umbrella, and the feed layout would reach neither Swift nor the driver.
+module MycoAtomics {
+    umbrella "."
+    export *
+}

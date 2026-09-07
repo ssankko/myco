@@ -117,3 +117,28 @@ func toneAmplitude(
     let count = Double(range.count)
     return (pow(2 * cosine / count, 2) + pow(2 * sine / count, 2)).squareRoot()
 }
+
+/// A second output device that exists on any machine with the driver and plays nowhere: an
+/// aggregate over one of Mixanimo's own devices, visible to this process only.
+final class PrivateAggregate {
+    let id: AudioDeviceID
+    let uid: String
+
+    init(over device: AudioDevice) throws {
+        uid = "com.mixanimo.tests.\(UUID().uuidString)"
+        let description: [String: Any] = [
+            kAudioAggregateDeviceNameKey: "Mixanimo test output",
+            kAudioAggregateDeviceUIDKey: uid,
+            kAudioAggregateDeviceIsPrivateKey: 1,
+            kAudioAggregateDeviceSubDeviceListKey: [[kAudioSubDeviceUIDKey: try device.uid]],
+        ]
+        var id = AudioDeviceID(0)
+        let status = AudioHardwareCreateAggregateDevice(description as CFDictionary, &id)
+        guard status == noErr else { throw XCTSkip("aggregate device: \(status)") }
+        self.id = id
+        // The HAL builds the aggregate's streams after the call returns.
+        Thread.sleep(forTimeInterval: 0.5)
+    }
+
+    func destroy() { AudioHardwareDestroyAggregateDevice(id) }
+}

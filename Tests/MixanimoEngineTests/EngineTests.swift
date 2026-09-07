@@ -261,8 +261,8 @@ final class EngineTests: XCTestCase {
     /// its identity and its status, and only the new device is started.
     func testEnablingASecondOutputLeavesTheFirstRunning() async throws {
         _ = try device(AppModel.outputDeviceUID)
-        _ = try device(AppModel.micDeviceUID)
-        let second = try secondOutput()
+        let second = try PrivateAggregate(over: try device(AppModel.micDeviceUID))
+        defer { second.destroy() }
 
         var settings = settings(virtualRate: 48000)
         settings.outputs[AppModel.micDeviceUID] = OutputSettings(enabled: true)
@@ -273,7 +273,7 @@ final class EngineTests: XCTestCase {
         let before = await nodes(engine)
         XCTAssertEqual(before.count, 1)
 
-        model.updateOutput(try second.uid) { $0.enabled = true }
+        model.updateOutput(second.uid) { $0.enabled = true }
         try await Task.sleep(for: .seconds(1))
 
         let after = await nodes(engine)
@@ -282,7 +282,7 @@ final class EngineTests: XCTestCase {
             after.first { $0.uid == AppModel.micDeviceUID }?.node === before[0].node,
             "the playing output was built anew")
         XCTAssertEqual(model.outputStatus[AppModel.micDeviceUID]?.isActive, true)
-        XCTAssertEqual(model.outputStatus[try second.uid]?.isActive, true)
+        XCTAssertEqual(model.outputStatus[second.uid]?.isActive, true)
         XCTAssertFalse(model.isApplying)
     }
 
@@ -290,9 +290,9 @@ final class EngineTests: XCTestCase {
     /// other output where it is.
     func testChangingOneBufferSizeReplacesOnlyThatOutput() async throws {
         _ = try device(AppModel.outputDeviceUID)
-        _ = try device(AppModel.micDeviceUID)
-        let second = try secondOutput()
-        let secondUID = try second.uid
+        let second = try PrivateAggregate(over: try device(AppModel.micDeviceUID))
+        defer { second.destroy() }
+        let secondUID = second.uid
 
         var settings = settings(virtualRate: 48000)
         settings.outputs[AppModel.micDeviceUID] = OutputSettings(enabled: true)
@@ -325,20 +325,6 @@ final class EngineTests: XCTestCase {
     /// after a stop cannot land at the address of one that went and pass for it.
     private func nodes(_ engine: Engine) async -> [(uid: String, node: OutputNode)] {
         await EngineActor.run { engine.outputs.map { (uid: $0.uid, node: $0) } }
-    }
-
-    /// An alive output device that is none of Mixanimo's own, the built-in speakers last so a test
-    /// opens them only when the machine has nothing else.
-    private func secondOutput() throws -> AudioDevice {
-        let mine = [AppModel.outputDeviceUID, AppModel.micDeviceUID]
-        let candidates = try AudioDevice.all.filter {
-            $0.hasOutput && $0.isAlive && !mine.contains((try? $0.uid) ?? "")
-        }
-        guard
-            let device = candidates.first(where: { $0.transportType != .builtIn })
-                ?? candidates.first
-        else { throw XCTSkip("this machine has no second output device") }
-        return device
     }
 
     func testInstalledDriverReportsItsVersion() throws {

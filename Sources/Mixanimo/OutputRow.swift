@@ -101,21 +101,34 @@ struct OutputRow: View {
     }
 
     /// What the user sets once and the numbers that say how it turned out.
+    /// One row while it fits; the readouts drop under the controls only when they do not.
     private var details: some View {
-        VStack(alignment: .leading, spacing: 5) {
+        ViewThatFits(in: .horizontal) {
             HStack(spacing: 8) {
-                bufferPicker
-                if model.settings.sync {
-                    syncTrim
-                    Text("\(Readout.milliseconds(status.delayMilliseconds)) ms delay")
-                        .font(.system(size: 10.5).monospacedDigit())
-                        .foregroundStyle(.tertiary)
-                        .accessibilityLabel(
-                            "Delay on \(entry.name), \(Readout.milliseconds(status.delayMilliseconds)) milliseconds")
-                }
+                setup
                 Spacer(minLength: 4)
+                statusLine
             }
-            statusLine
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(spacing: 8) {
+                    setup
+                    Spacer(minLength: 4)
+                }
+                statusLine
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var setup: some View {
+        bufferPicker
+        if model.settings.sync {
+            syncTrim
+            Text("\(Readout.milliseconds(status.delayMilliseconds)) ms delay")
+                .font(.system(size: 10.5).monospacedDigit())
+                .foregroundStyle(.tertiary)
+                .accessibilityLabel(
+                    "Delay on \(entry.name), \(Readout.milliseconds(status.delayMilliseconds)) milliseconds")
         }
     }
 

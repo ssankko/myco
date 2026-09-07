@@ -147,7 +147,6 @@ private struct BandInspector: View {
             GlyphToggle(
                 label: "Bypass band \(index + 1)", symbol: "power", isOn: binding(\.bypass))
         }
-        .rail(band.bypass ? .off : .live)
         .opacity(band.bypass ? 0.6 : 1)
     }
 

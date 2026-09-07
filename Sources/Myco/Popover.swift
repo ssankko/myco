@@ -160,27 +160,12 @@ struct Popover: View {
 
             VStack(alignment: .leading, spacing: 7) {
                 Toggle("Keep Myco as the system device", isOn: $model.settings.pinDefaults)
-                HStack {
-                    Toggle("Open at login", isOn: $model.settings.launchAtLogin)
-                    Spacer(minLength: 8)
-                    if model.driver.isReady {
-                        Button("Remove driver") { actions.run(actions.uninstall) }
-                            .buttonStyle(.borderless)
-                            .font(.system(size: 11))
-                            .foregroundStyle(Theme.danger)
-                            .disabled(actions.uninstall == nil || actions.isWorking)
-                    }
-                }
+                Toggle("Open at login", isOn: $model.settings.launchAtLogin)
             }
             .toggleStyle(.checkbox)
+            .tint(Theme.signal)
             .controlSize(.small)
             .font(.system(size: 11))
-
-            Button("Quit Myco") { NSApplication.shared.terminate(nil) }
-                .buttonStyle(.borderless)
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
-                .keyboardShortcut("q")
         }
     }
 
@@ -228,9 +213,13 @@ private struct NoticeRow: View {
             if isWorking {
                 ProgressView().controlSize(.small).scaleEffect(0.7).frame(width: 16, height: 16)
             } else if let actionTitle {
-                Button(actionTitle, action: action)
-                    .controlSize(.small)
-                    .disabled(!isEnabled)
+                Button(action: action) {
+                    Text(actionTitle)
+                        .font(.system(size: 11, weight: .medium))
+                        .glyphChrome(tint: .primary)
+                }
+                .buttonStyle(.borderless)
+                .disabled(!isEnabled)
             }
         }
         .padding(.horizontal, 8)
@@ -249,7 +238,7 @@ private struct EmptyLane: View {
             .font(.system(size: 11))
             .foregroundStyle(.tertiary)
             .padding(.vertical, 4)
-            .rail(.off)
+            .padding(.leading, 9)
     }
 }
 

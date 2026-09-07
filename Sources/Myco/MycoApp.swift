@@ -28,7 +28,7 @@ struct MycoApp: App {
         _actions = State(initialValue: actions)
         _engine = State(initialValue: engine)
         _updater = State(initialValue: updater)
-        StatusItem.install(Popover(model: model, actions: actions, updater: updater))
+        StatusItem.install(Popover(model: model, actions: actions, updater: updater), model: model, actions: actions)
     }
 
     var body: some Scene {
@@ -82,25 +82,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
-/// The menu bar item and the popover it opens. `MenuBarExtra` measures its window once and keeps
-/// that size, which clips every control that appears later; an `NSPopover` over an
-/// `NSHostingController` follows the content size instead.
+/// The menu bar item, the popover a click opens and the menu a right click opens. `MenuBarExtra`
+/// measures its window once and keeps that size, which clips every control that appears later;
+/// an `NSPopover` over an `NSHostingController` follows the content size instead.
 @MainActor
 final class StatusItem: NSObject {
     /// The status bar keeps no strong reference, so the app's one item lives here.
     private static var live: StatusItem?
 
-    static func install(_ content: some View) { live = StatusItem(content: content) }
+    static func install(_ content: some View, model: AppModel, actions: Actions) {
+        live = StatusItem(content: content, model: model, actions: actions)
+    }
 
     private let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
     private let popover = NSPopover()
+    private let model: AppModel
+    private let actions: Actions
     /// Watches for clicks in other apps while the popover is open.
     private var outsideClicks: Any?
     /// Watches for clicks in this app's other windows, and for Escape, while the popover is open.
     private var localEvents: Any?
     private var becameActive: (any NSObjectProtocol)?
 
-    private init(content: some View) {
+    private init(content: some View, model: AppModel, actions: Actions) {
+        self.model = model
+        self.actions = actions
         super.init()
         let host = NSHostingController(rootView: content)
         host.sizingOptions = [.preferredContentSize]
@@ -117,12 +123,17 @@ final class StatusItem: NSObject {
         item.button?.setAccessibilityLabel("Myco")
         item.button?.target = self
         item.button?.action = #selector(toggle(_:))
+        item.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
     }
 
     @objc private func toggle(_ sender: Any?) {
         guard let button = item.button else { return }
         if popover.isShown {
             popover.performClose(nil)
+            return
+        }
+        if NSApplication.shared.currentEvent?.type == .rightMouseUp {
+            showMenu()
             return
         }
         // An accessory app is not frontmost after a status item click, and cooperative activation
@@ -152,6 +163,12 @@ final class StatusItem: NSObject {
         }
         localEvents = NSEvent.addLocalMonitorForEvents(matching: clicks.union(.keyDown)) { [weak self] event in
             let escape = event.type == .keyDown && event.keyCode == 53
+            let quit = event.type == .keyDown && event.modifierFlags.contains(.command)
+                && event.charactersIgnoringModifiers == "q"
+            if quit {
+                MainActor.assumeIsolated { NSApplication.shared.terminate(nil) }
+                return nil
+            }
             let closes = MainActor.assumeIsolated { () -> Bool in
                 guard let self else { return false }
                 let inside = event.window == self.popover.contentViewController?.view.window
@@ -162,6 +179,27 @@ final class StatusItem: NSObject {
             return escape ? nil : event
         }
     }
+
+    /// The item's menu is set only for the duration of the click, so a left click keeps opening
+    /// the popover.
+    private func showMenu() {
+        let menu = NSMenu()
+        let remove = NSMenuItem(title: "Remove driver", action: #selector(removeDriver), keyEquivalent: "")
+        remove.target = self
+        remove.isEnabled = model.driver.isReady && actions.uninstall != nil && !actions.isWorking
+        menu.addItem(remove)
+        menu.addItem(.separator())
+        let quit = NSMenuItem(title: "Quit Myco", action: #selector(quit), keyEquivalent: "q")
+        quit.target = self
+        menu.addItem(quit)
+        item.menu = menu
+        item.button?.performClick(nil)
+        item.menu = nil
+    }
+
+    @objc private func removeDriver() { actions.run(actions.uninstall) }
+
+    @objc private func quit() { NSApplication.shared.terminate(nil) }
 }
 
 extension StatusItem: NSPopoverDelegate {

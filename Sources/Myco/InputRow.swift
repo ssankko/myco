@@ -48,9 +48,8 @@ struct InputRow: View {
                 }
             }
         }
-        .padding(.trailing, 9)
+        .padding(.horizontal, 9)
         .padding(.vertical, settings.enabled ? Theme.cardPadding : 5)
-        .rail(settings.enabled ? (settings.muted ? .armed : .live) : .off)
         .background(fill, in: .rect(cornerRadius: Theme.cardRadius))
         .onHover { isHovered = $0 }
     }

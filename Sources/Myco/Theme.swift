@@ -8,8 +8,14 @@ enum Theme {
     static let brandMint = Color(red: 0xC5 / 255, green: 0xF4 / 255, blue: 0xD4 / 255)
     static let brandForest = Color(red: 0x17 / 255, green: 0x3B / 255, blue: 0x30 / 255)
 
-    /// Lit signal. Every control that carries audio borrows this colour.
-    static let signal = dynamic(light: (0.24, 0.31, 0.80), dark: (0.51, 0.57, 1.00))
+    /// Lit signal. Every control that carries audio borrows this colour: the accent chosen in
+    /// System Settings, or the brand green when that setting is Multicolor.
+    static var signal: Color { Accent.shared.system ?? brandSignal }
+    /// Text and glyphs on top of `signal`.
+    static let onSignal = Color.white
+    /// The forest hue at the saturation of the system accents, a step lighter on a dark
+    /// background so it still stands off it.
+    private static let brandSignal = dynamic(light: (0.16, 0.47, 0.37), dark: (0.20, 0.60, 0.48))
     /// Something works but needs attention: underruns, an old driver.
     static let caution = dynamic(light: (0.72, 0.47, 0.06), dark: (0.95, 0.70, 0.25))
     /// Nothing is flowing: no driver, a dead device.
@@ -17,18 +23,20 @@ enum Theme {
     /// A control that takes something away and does not put it back.
     static let danger = stopped
 
-    /// Hairline the rails and dividers share, so an idle row still shows its lane.
+    /// Hairline for dividers.
     static let track = Color.primary.opacity(0.11)
 
     /// Behind a device that carries audio, and the same fill lifted under the pointer.
-    static let cardFill = signal.opacity(0.08)
-    static let cardFillHover = signal.opacity(0.15)
+    static var cardFill: Color { signal.opacity(0.08) }
+    static var cardFillHover: Color { signal.opacity(0.15) }
     /// Under the pointer on a device that is off.
     static let rowFillHover = Color.primary.opacity(0.06)
-    /// Around a small button, so it reads as one before the pointer reaches it.
+    /// Around a small button, so it reads as one before the pointer reaches it, and once it has.
     static let border = Color.primary.opacity(0.22)
+    static let borderHover = Color.primary.opacity(0.4)
+    /// A lit button under the pointer.
+    static var signalHover: Color { signal.opacity(0.8) }
 
-    static let rowGap: CGFloat = 10
     static let sectionGap: CGFloat = 14
     static let cardRadius: CGFloat = 8
     static let cardPadding: CGFloat = 8
@@ -36,7 +44,7 @@ enum Theme {
     static let glyphRadius: CGFloat = 5
     static let popoverWidth: CGFloat = 380
 
-    private static func dynamic(
+    fileprivate static func dynamic(
         light: (Double, Double, Double), dark: (Double, Double, Double)
     ) -> Color {
         Color(nsColor: NSColor(name: nil) { appearance in
@@ -68,5 +76,38 @@ enum Readout {
         return thousands == thousands.rounded()
             ? String(format: "%.0fk", thousands)
             : String(format: "%.1fk", thousands)
+    }
+}
+
+/// The accent picked in System Settings. A chosen colour is used as it is; "Multicolor" is
+/// nil and stands for the app's own colour.
+@Observable
+final class Accent: @unchecked Sendable {
+    static let shared = Accent()
+
+    private(set) var system: Color?
+
+    private init() {
+        refresh()
+        // AppKit posts this once it has re-read the accent, so `controlAccentColor` is fresh.
+        NotificationCenter.default.addObserver(
+            forName: NSColor.systemColorsDidChangeNotification, object: nil, queue: .main
+        ) { [weak self] _ in self?.refresh() }
+    }
+
+    private func refresh() {
+        // The key is absent while the setting is Multicolor.
+        let global = UserDefaults.standard.persistentDomain(forName: UserDefaults.globalDomain)
+        guard global?["AppleAccentColor"] != nil else { return system = nil }
+        // Resolved to components per appearance: wrapped as an NSColor, SwiftUI would swap the
+        // accent for the app's own.
+        func resolved(_ name: NSAppearance.Name) -> (Double, Double, Double) {
+            var c = NSColor.black
+            NSAppearance(named: name)!.performAsCurrentDrawingAppearance {
+                c = NSColor.controlAccentColor.usingColorSpace(.sRGB)!
+            }
+            return (c.redComponent, c.greenComponent, c.blueComponent)
+        }
+        system = Theme.dynamic(light: resolved(.aqua), dark: resolved(.darkAqua))
     }
 }

@@ -21,38 +21,6 @@ extension Array where Element == AudioDevice {
     }
 }
 
-/// The lane down the left of every device row. The list reads as a patch bay: a continuous
-/// hairline with the working devices lit.
-struct Rail: View {
-    enum Level { case off, armed, live }
-    let level: Level
-
-    var body: some View {
-        Capsule()
-            .fill(color)
-            .frame(width: 2)
-            .frame(maxHeight: .infinity)
-            .accessibilityHidden(true)
-    }
-
-    private var color: Color {
-        switch level {
-        case .off: Theme.track
-        case .armed: Theme.signal.opacity(0.35)
-        case .live: Theme.signal
-        }
-    }
-}
-
-extension View {
-    /// Hangs the row off its rail. An overlay, so the rail takes the row's height instead of
-    /// setting it.
-    func rail(_ level: Rail.Level) -> some View {
-        padding(.leading, Theme.rowGap + 2)
-            .overlay(alignment: .leading) { Rail(level: level) }
-    }
-}
-
 /// A section title, what the section does to the audio, and how much of it is on.
 struct SectionHeader: View {
     let title: String
@@ -147,7 +115,9 @@ struct MeterSlider: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            Slider(value: $value, in: range, step: step)
+            // The step is applied on write, so the value stays on its grid and the track carries
+            // no tick marks.
+            Slider(value: Binding(get: { value }, set: { value = ($0 / step).rounded() * step }), in: range)
                 .controlSize(.mini)
                 .tint(Theme.signal)
                 .accessibilityLabel(label)
@@ -178,14 +148,36 @@ struct MeterSlider: View {
 /// the control is on.
 extension View {
     func glyphChrome(isOn: Bool = false, tint: Color = .secondary) -> some View {
-        padding(.horizontal, 5)
+        modifier(GlyphChrome(isOn: isOn, tint: tint))
+    }
+}
+
+private struct GlyphChrome: ViewModifier {
+    let isOn: Bool
+    let tint: Color
+    @State private var isHovered = false
+
+    func body(content: Content) -> some View {
+        content
+            .padding(.horizontal, 5)
             .frame(height: Theme.glyphHeight)
-            .foregroundStyle(isOn ? .white : tint)
-            .background(isOn ? Theme.signal : .clear, in: .rect(cornerRadius: Theme.glyphRadius))
+            .foregroundStyle(isOn ? Theme.onSignal : tint)
+            .background(fill, in: .rect(cornerRadius: Theme.glyphRadius))
             .overlay {
                 RoundedRectangle(cornerRadius: Theme.glyphRadius)
-                    .strokeBorder(isOn ? Theme.signal : Theme.border, lineWidth: 1)
+                    .strokeBorder(border, lineWidth: 1)
             }
+            .onHover { isHovered = $0 }
+    }
+
+    private var fill: Color {
+        if isOn { return isHovered ? Theme.signalHover : Theme.signal }
+        return isHovered ? Theme.rowFillHover : .clear
+    }
+
+    private var border: Color {
+        if isOn { return isHovered ? Theme.signalHover : Theme.signal }
+        return isHovered ? Theme.borderHover : Theme.border
     }
 }
 

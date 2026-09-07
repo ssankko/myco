@@ -49,7 +49,7 @@ Requires macOS 14 or later.
 3. Open Myco from the menu bar and click **Install**. macOS asks for an administrator password because the driver goes into `/Library/Audio/Plug-Ins/HAL`.
 4. Turn on the outputs you want to hear.
 
-**Remove driver** at the bottom of the popover takes the driver out again.
+**Remove driver** in the menu bar icon's right-click menu takes the driver out again.
 
 ## Build
 

@@ -6,7 +6,40 @@ import Foundation
 let micMixRate: Double = 48000
 
 /// Weight of one block in the running average of a ring's fill, which spans about a second.
-let fillSmoothing = 0.002
+private let fillSmoothing = 0.002
+
+/// Follows a producer's clock through the fill level of what it writes, and yields the resample
+/// ratio that holds that fill at its target.
+///
+/// The producer writes a whole block at a time, so the fill jumps by that block at every write and
+/// the ratio follows its running average; the instantaneous fill would swing the pitch every cycle.
+struct ClockFollower {
+    var drift: DriftController
+    /// The running average the ratio is taken from.
+    private(set) var fill: Double
+
+    init(targetFillFrames: Double, gain: Double = 1e-4) {
+        drift = DriftController(targetFillFrames: targetFillFrames, gain: gain)
+        fill = targetFillFrames
+    }
+
+    /// Aims at a reader that starts `target` frames behind a producer writing `producerBlock` at a
+    /// time. The fill sweeps a whole block between two writes, so its average sits half a block
+    /// below where the reader starts, and aiming there leaves the ratio at rest.
+    mutating func aim(target: Double, producerBlock: Double) {
+        drift.targetFillFrames = max(0, target - producerBlock / 2)
+        fill = drift.targetFillFrames
+    }
+
+    /// Drops the average and starts it at the target, for a reader that took a fresh position.
+    mutating func restart() { fill = drift.targetFillFrames }
+
+    /// The ratio for this cycle: `base` nudged by how far the average fill sits from the target.
+    mutating func ratio(base: Double, fill sample: Double) -> Double {
+        fill += fillSmoothing * (sample - fill)
+        return base * drift.ratioMultiplier(fillFrames: fill)
+    }
+}
 
 /// Throws away whatever a ring holds above `level` and answers what is left. Audio thread only:
 /// only the reader may drop frames.
@@ -36,11 +69,10 @@ struct MonitorTap: @unchecked Sendable {
 
     struct State {
         var resampler: Resampler
-        var fill: Double
+        var follower: ClockFollower
         var primed: Bool
         var inputs: Int
         var primeLevel: Double
-        var drift: DriftController
     }
 
     /// `maxInputs` rings, of which the first `configure`d count are live.
@@ -76,8 +108,8 @@ struct MonitorTap: @unchecked Sendable {
         state = .allocate(capacity: 1)
         state.initialize(
             to: State(
-                resampler: resampler, fill: 0, primed: false, inputs: 0, primeLevel: 0,
-                drift: DriftController(targetFillFrames: 0)))
+                resampler: resampler, follower: ClockFollower(targetFillFrames: 0), primed: false,
+                inputs: 0, primeLevel: 0))
         wantedInputs = AtomicCounter()
         wantedPrimeLevel = AtomicFloat(0)
     }
@@ -118,10 +150,9 @@ struct MonitorTap: @unchecked Sendable {
             discard()
             state.pointee.inputs = inputs
             state.pointee.primeLevel = Double(wantedPrimeLevel.value)
-            // The fill sweeps a whole input block between writes, so its average sits half a block
-            // below the level that started it; aiming there leaves the ratio at rest.
-            state.pointee.drift.targetFillFrames =
-                max(0, state.pointee.primeLevel - (state.pointee.primeLevel - 2 * pull) / 2)
+            state.pointee.follower.aim(
+                target: state.pointee.primeLevel,
+                producerBlock: state.pointee.primeLevel - 2 * pull)
         }
         guard inputs > 0 else { return false }
         let live = rings.prefix(inputs)
@@ -136,14 +167,11 @@ struct MonitorTap: @unchecked Sendable {
             for ring in live {
                 fill = min(fill, drop(ring, above: Int(primeLevel), through: part, capacity: capacity))
             }
-            state.pointee.fill = state.pointee.drift.targetFillFrames
+            state.pointee.follower.restart()
         }
 
-        // The fill jumps by a whole producer block every cycle; the ratio follows its average, so
-        // the correction tracks the clock difference instead of the block pattern.
-        state.pointee.fill += fillSmoothing * (Double(fill) - state.pointee.fill)
         state.pointee.resampler.ratio =
-            baseRatio * state.pointee.drift.ratioMultiplier(fillFrames: state.pointee.fill)
+            state.pointee.follower.ratio(base: baseRatio, fill: Double(fill))
         let need = min(state.pointee.resampler.inputFramesNeeded(forOutput: count), capacity)
         var short = false
         var first = true
@@ -167,30 +195,24 @@ struct MonitorTap: @unchecked Sendable {
     }
 }
 
-/// One enabled physical output: its place in the driver's shared ring, the chain its IO callback
-/// runs and the handles the control thread pushes parameters through.
-@EngineActor
-final class OutputNode {
+/// One output's IO cycle: its place in the driver's shared ring, the chain it pulls the ring
+/// through and the handles the control thread pushes parameters into.
+///
+/// All state lives in allocations this value owns, so a copy of it is another handle: the IO proc
+/// keeps one and the node keeps one. Call `deallocate()` once the proc has gone.
+struct OutputRender: @unchecked Sendable {
     struct State {
         var resampler: Resampler
         var reader: FeedReader
-        var drift: DriftController
-        var fill: Double
+        var follower: ClockFollower
         var gain: SmoothedGain
         var monitorGain: SmoothedGain
         var master: SmoothedGain
     }
 
-    let uid: String
-    let device: AudioDevice
-    let sampleRate: Double
-    let bufferFrames: Int
-    let latency: OutputLatency
+    let tap: MonitorTap
     let eq: Equalizer
     let delay: DelayLine
-    let tap: MonitorTap
-    /// The tap's rings, for a test that watches them drain.
-    nonisolated var tapRings: UnsafeMutableBufferPointer<RingBuffer> { tap.rings }
 
     let gainTarget = AtomicFloat(1)
     /// Zero while the monitor is off; the ramp to and from it is what keeps a toggle silent.
@@ -199,44 +221,40 @@ final class OutputNode {
     let underruns = AtomicCounter()
     /// Frames taken from the shared ring since the proc started.
     let frames = AtomicCounter()
+    /// What the reader holds in the shared ring, in the device's frames, which is part of the
+    /// latency the output reports.
+    let ringFill: Int
 
-    private let state: UnsafeMutablePointer<State>
+    private let feed: SharedFeed
+    private let baseRatio: Double
+    private let bufferFrames: Int
+    /// Frames of the shared ring one IO cycle can ask for.
+    private let pull: Int
     private let feedScratch: UnsafeMutablePointer<Float>
     private let mix: UnsafeMutablePointer<Float>
     private let monitor: UnsafeMutablePointer<Float>
-    private var proc: IOProc?
+    private let state: UnsafeMutablePointer<State>
 
     init(
-        uid: String, device: AudioDevice, settings: OutputSettings, virtualRate: Double,
-        feed: SharedFeed
-    ) throws {
-        self.uid = uid
-        self.device = device
-        sampleRate = try device.nominalSampleRate
-
-        let wanted = OutputNode.effectiveBufferFrames(device, settings.bufferFrames)
-        try? device.setBufferFrameSize(wanted)
-        bufferFrames = Int((try? device.bufferFrameSize) ?? wanted)
-
-        let baseRatio = virtualRate / sampleRate
+        feed: SharedFeed, virtualRate: Double, sampleRate: Double, bufferFrames: Int, gainDB: Float
+    ) {
+        self.feed = feed
+        self.bufferFrames = bufferFrames
+        baseRatio = virtualRate / sampleRate
         let resampler = Resampler(
             channels: 2, ratio: baseRatio, maxDownsampleFactor: max(1, (baseRatio * 1.01).rounded(.up)))
         // One IO cycle of this output, in the ring's frames, plus what the resampler needs around it.
-        let pull =
+        pull =
             Int((Double(bufferFrames) * baseRatio * 1.01).rounded(.up)) + 2 * resampler.tapsPerSide + 8
         // The drift gain is a tenth of the default because the averaged fill still wanders tens of
         // frames, and this keeps that wander under a tenth of a per cent of pitch instead of an
         // audible slow wow. The target itself follows the driver's block at every resync.
-        let drift = DriftController(
-            targetFillFrames: Double(FeedReader.targetFill(writeBlock: feed.writeBlockFrames, pull: pull)),
+        let follower = ClockFollower(
+            targetFillFrames: Double(
+                FeedReader.targetFill(writeBlock: feed.writeBlockFrames, pull: pull)),
             gain: 1e-5)
-        latency = OutputLatency(
-            deviceLatency: Int((try? device.latency(scope: .output)) ?? 0),
-            safetyOffset: Int((try? device.safetyOffset(scope: .output)) ?? 0),
-            streamLatency: Int((try? device.streamLatency(scope: .output)) ?? 0),
-            bufferSize: bufferFrames,
-            ringFill: Int((drift.targetFillFrames / baseRatio).rounded()),
-            sampleRate: sampleRate)
+        ringFill = Int((follower.drift.targetFillFrames / baseRatio).rounded())
+
         eq = Equalizer(sampleRate: sampleRate, channels: 2)
         delay = DelayLine(
             maxDelayFrames: max(1024, Int(sampleRate / 2)), channels: 2, crossfadeFrames: 256)
@@ -253,100 +271,154 @@ final class OutputNode {
             to: State(
                 resampler: resampler,
                 reader: FeedReader(),
-                drift: drift,
-                fill: drift.targetFillFrames,
-                gain: SmoothedGain(sampleRate: sampleRate, decibels: settings.gainDB),
+                follower: follower,
+                gain: SmoothedGain(sampleRate: sampleRate, decibels: gainDB),
                 monitorGain: SmoothedGain(sampleRate: sampleRate, decibels: silenceDecibels),
                 // Silent at first, so a proc that starts mid-waveform ramps in instead of clicking.
                 master: SmoothedGain(sampleRate: sampleRate, decibels: silenceDecibels)))
+    }
 
-        nonisolated(unsafe) let state = self.state
-        nonisolated(unsafe) let feedScratch = self.feedScratch
-        nonisolated(unsafe) let mix = self.mix
-        nonisolated(unsafe) let monitor = self.monitor
-        let eq = self.eq
-        let delay = self.delay
-        let tap = self.tap
-        let underruns = self.underruns
-        let frames = self.frames
-        let gainTarget = self.gainTarget
-        let monitorGainTarget = self.monitorGainTarget
-        let masterTarget = self.masterTarget
-        let bufferFrames = self.bufferFrames
+    func deallocate() {
+        tap.deallocate()
+        state.pointee.resampler.deallocate()
+        state.deallocate()
+        eq.deallocate()
+        delay.deallocate()
+        feedScratch.deallocate()
+        mix.deallocate()
+        monitor.deallocate()
+        gainTarget.deallocate()
+        monitorGainTarget.deallocate()
+        masterTarget.deallocate()
+        underruns.deallocate()
+        frames.deallocate()
+    }
+
+    /// Fills one IO cycle of the device. Audio thread only.
+    func render(into output: UnsafeMutableAudioBufferListPointer) {
+        let count = min(bufferListFrames(output), bufferFrames)
+        guard count > 0 else { return }
+        var playing = pullFeed(count)
+        if mixMonitor(count) { playing = true }
+        guard playing else {
+            silence(output)
+            return
+        }
+
+        eq.process(mix, frames: count)
+        delay.process(mix, frames: count)
+        state.pointee.gain.setTarget(linear: gainTarget.value)
+        state.pointee.gain.apply(mix, frames: count, channels: 2)
+        state.pointee.master.setTarget(linear: masterTarget.value)
+        state.pointee.master.apply(mix, frames: count, channels: 2)
+        scatterStereo(mix, frames: count, into: output)
+    }
+
+    /// Resamples what the shared ring holds into the mix. False leaves the mix silent: nothing
+    /// plays into the virtual device, and only the mic monitor can still come through.
+    private func pullFeed(_ count: Int) -> Bool {
+        // The write position is read first: the block that published it is already there, while
+        // the other order can pair a fresh position with the block before it.
+        let write = feed.writeFrame
+        let writeBlock = feed.writeBlockFrames
+        let target = FeedReader.targetFill(writeBlock: writeBlock, pull: pull)
+        guard
+            let step = state.pointee.reader.step(
+                write: write, generation: feed.generation, target: target)
+        else {
+            mix.update(repeating: 0, count: count * 2)
+            return false
+        }
+        if step.resynced {
+            state.pointee.follower.aim(target: Double(target), producerBlock: Double(writeBlock))
+        }
+
+        state.pointee.resampler.ratio =
+            state.pointee.follower.ratio(base: baseRatio, fill: Double(step.fill))
+        let need = min(state.pointee.resampler.inputFramesNeeded(forOutput: count), pull)
+        let taken = min(need, step.fill)
+        feed.read(from: state.pointee.reader.readFrame, into: feedScratch, frames: taken)
+        if taken < need {
+            underruns.add(1)
+            feedScratch.advanced(by: taken * 2).update(repeating: 0, count: (need - taken) * 2)
+        }
+        state.pointee.reader.advance(taken)
+        frames.add(taken)
+        let produced = state.pointee.resampler
+            .process(input: feedScratch, frames: need, output: mix, capacity: count).produced
+        if produced < count {
+            mix.advanced(by: produced * 2).update(repeating: 0, count: (count - produced) * 2)
+        }
+        return true
+    }
+
+    /// Sums the mic monitor into the mix. The tap is drained every cycle, so its rings never fill
+    /// up while the music pauses or the monitor is off.
+    private func mixMonitor(_ count: Int) -> Bool {
+        state.pointee.monitorGain.setTarget(linear: monitorGainTarget.value)
+        if state.pointee.monitorGain.target == 0 && state.pointee.monitorGain.current == 0 {
+            tap.discard()
+            return false
+        }
+        guard tap.render(into: monitor, frames: count) else { return false }
+        state.pointee.monitorGain.apply(monitor, frames: count, channels: 1)
+        vDSP_vadd(mix, 2, monitor, 1, mix, 2, vDSP_Length(count))
+        vDSP_vadd(mix + 1, 2, monitor, 1, mix + 1, 2, vDSP_Length(count))
+        return true
+    }
+}
+
+/// One enabled physical output: the device, what it measures, and the IO proc that renders into it.
+@EngineActor
+final class OutputNode {
+    let uid: String
+    let device: AudioDevice
+    let sampleRate: Double
+    let bufferFrames: Int
+    let latency: OutputLatency
+    let render: OutputRender
+
+    var tap: MonitorTap { render.tap }
+    var eq: Equalizer { render.eq }
+    var delay: DelayLine { render.delay }
+    var gainTarget: AtomicFloat { render.gainTarget }
+    var monitorGainTarget: AtomicFloat { render.monitorGainTarget }
+    var masterTarget: AtomicFloat { render.masterTarget }
+    var underruns: AtomicCounter { render.underruns }
+    /// Frames taken from the shared ring since the proc started.
+    var frames: AtomicCounter { render.frames }
+    /// The tap's rings, for a test that watches them drain.
+    nonisolated var tapRings: UnsafeMutableBufferPointer<RingBuffer> { render.tap.rings }
+
+    private var proc: IOProc?
+
+    init(
+        uid: String, device: AudioDevice, settings: OutputSettings, virtualRate: Double,
+        feed: SharedFeed
+    ) throws {
+        self.uid = uid
+        self.device = device
+        sampleRate = try device.nominalSampleRate
+
+        let wanted = OutputNode.effectiveBufferFrames(device, settings.bufferFrames)
+        try? device.setBufferFrameSize(wanted)
+        bufferFrames = Int((try? device.bufferFrameSize) ?? wanted)
+
+        let render = OutputRender(
+            feed: feed, virtualRate: virtualRate, sampleRate: sampleRate,
+            bufferFrames: bufferFrames, gainDB: settings.gainDB)
+        self.render = render
+        latency = OutputLatency(
+            deviceLatency: Int((try? device.latency(scope: .output)) ?? 0),
+            safetyOffset: Int((try? device.safetyOffset(scope: .output)) ?? 0),
+            streamLatency: Int((try? device.streamLatency(scope: .output)) ?? 0),
+            bufferSize: bufferFrames,
+            ringFill: render.ringFill,
+            sampleRate: sampleRate)
 
         proc = try IOProc(device: device) { _, _, _, output, _ in
             guard let output else { return }
-            let count = min(bufferListFrames(output), bufferFrames)
-            guard count > 0 else { return }
-
-            // The write position is read first: the block that published it is already there,
-            // while the other order can pair a fresh position with the block before it.
-            let write = feed.writeFrame
-            let writeBlock = feed.writeBlockFrames
-            let target = FeedReader.targetFill(writeBlock: writeBlock, pull: pull)
-            var playing = false
-            if let step = state.pointee.reader.step(
-                write: write, generation: feed.generation, target: target)
-            {
-                playing = true
-                if step.resynced {
-                    // The fill sweeps a whole driver block between two of its writes, so its
-                    // average sits half a block below the level the reader starts at; aiming there
-                    // leaves the ratio at rest.
-                    state.pointee.drift.targetFillFrames =
-                        max(0, Double(target) - Double(writeBlock) / 2)
-                    state.pointee.fill = state.pointee.drift.targetFillFrames
-                }
-
-                // The driver writes a block at a time, so the ratio follows the average fill; the
-                // instantaneous one would swing the pitch by the whole block every cycle.
-                state.pointee.fill += fillSmoothing * (Double(step.fill) - state.pointee.fill)
-                state.pointee.resampler.ratio =
-                    baseRatio * state.pointee.drift.ratioMultiplier(fillFrames: state.pointee.fill)
-                let need = min(state.pointee.resampler.inputFramesNeeded(forOutput: count), pull)
-                let taken = min(need, step.fill)
-                feed.read(from: state.pointee.reader.readFrame, into: feedScratch, frames: taken)
-                if taken < need {
-                    underruns.add(1)
-                    feedScratch.advanced(by: taken * 2)
-                        .update(repeating: 0, count: (need - taken) * 2)
-                }
-                state.pointee.reader.advance(taken)
-                frames.add(taken)
-                let produced = state.pointee.resampler
-                    .process(input: feedScratch, frames: need, output: mix, capacity: count).produced
-                if produced < count {
-                    mix.advanced(by: produced * 2)
-                        .update(repeating: 0, count: (count - produced) * 2)
-                }
-            } else {
-                // Nothing plays into the virtual device; the mic monitor still has to come through.
-                mix.update(repeating: 0, count: count * 2)
-            }
-
-            // The tap is drained every cycle, so its rings never fill up while the music pauses or
-            // the monitor is off.
-            state.pointee.monitorGain.setTarget(linear: monitorGainTarget.value)
-            if state.pointee.monitorGain.target == 0 && state.pointee.monitorGain.current == 0 {
-                tap.discard()
-            } else if tap.render(into: monitor, frames: count) {
-                playing = true
-                state.pointee.monitorGain.apply(monitor, frames: count, channels: 1)
-                vDSP_vadd(mix, 2, monitor, 1, mix, 2, vDSP_Length(count))
-                vDSP_vadd(mix + 1, 2, monitor, 1, mix + 1, 2, vDSP_Length(count))
-            }
-            guard playing else {
-                silence(output)
-                return
-            }
-
-            eq.process(mix, frames: count)
-            delay.process(mix, frames: count)
-            state.pointee.gain.setTarget(linear: gainTarget.value)
-            state.pointee.gain.apply(mix, frames: count, channels: 2)
-            state.pointee.master.setTarget(linear: masterTarget.value)
-            state.pointee.master.apply(mix, frames: count, channels: 2)
-            scatterStereo(mix, frames: count, into: output)
+            render.render(into: output)
         }
     }
 
@@ -368,19 +440,7 @@ final class OutputNode {
 
     func stop() {
         proc = nil
-        tap.deallocate()
-        state.pointee.resampler.deallocate()
-        state.deallocate()
-        eq.deallocate()
-        delay.deallocate()
-        feedScratch.deallocate()
-        mix.deallocate()
-        monitor.deallocate()
-        gainTarget.deallocate()
-        monitorGainTarget.deallocate()
-        masterTarget.deallocate()
-        underruns.deallocate()
-        frames.deallocate()
+        render.deallocate()
     }
 }
 

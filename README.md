@@ -4,7 +4,7 @@
 
 # Myco
 
-**One audio stream to every speaker, every microphone into one input**
+**Lightweight, ergonomic multi-output audio device for macOS**
 
 [![CI](https://github.com/ssankko/myco/actions/workflows/ci.yml/badge.svg)](https://github.com/ssankko/myco/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/tag/ssankko/myco?label=release&color=c5f4d4)](https://github.com/ssankko/myco/releases)

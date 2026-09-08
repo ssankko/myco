@@ -202,6 +202,45 @@ final class EngineTests: XCTestCase {
         XCTAssertGreaterThan(level, 0, "the mic mix reached the device as silence")
     }
 
+    /// The microphones open only while something listens. Idle, the source device runs in no
+    /// process, so macOS shows no microphone indicator; a reader on `Myco Mic` opens it. The
+    /// engine's own writer on `Myco Mic` uses no input stream, so it counts as no reader even from
+    /// a process that is not the app.
+    func testInputsOpenOnlyWhileTheMicDeviceIsRead() async throws {
+        _ = try device(AppModel.outputDeviceUID)
+        let mic = try device(AppModel.micDeviceUID)
+        guard let source = try AudioDevice.all.first(where: { $0.transportType == .builtIn && $0.hasInput })
+        else { throw XCTSkip("this machine has no built-in microphone") }
+        let running = AudioObjectPropertyAddress(kAudioDevicePropertyDeviceIsRunningSomewhere)
+        guard try source.id.value(running) as UInt32 == 0
+        else { throw XCTSkip("another process holds the built-in microphone") }
+
+        // A reader from the test before holds its slot in the driver for up to half a second.
+        let readers = AudioObjectPropertyAddress(AudioObjectPropertySelector(0x6D78_6369))
+        for _ in 0..<30 where (try? mic.id.string(readers)) != "0" {
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        XCTAssertEqual(try mic.id.string(readers), "0", "Myco Mic still has a reader from another test")
+
+        var settings = settings(virtualRate: 48000)
+        settings.inputs[try source.uid] = InputSettings(enabled: true)
+        let model = AppModel(settings: settings)
+        let engine = Engine(model: model, managesDefaults: false, defaultsStore: emptyStore())
+        await engine.start()
+        addTeardownBlock { await engine.stop() }
+
+        try await Task.sleep(for: .milliseconds(500))
+        XCTAssertEqual(try source.id.value(running) as UInt32, 0, "the microphone opened with nothing listening")
+
+        let capture = try Capture(device: mic, seconds: 2)
+        try capture.start()
+        try await Task.sleep(for: .seconds(1.0))
+        XCTAssertEqual(try source.id.value(running) as UInt32, 1, "a reader on Myco Mic left the microphone closed")
+        _ = capture.stop()
+        try await Task.sleep(for: .seconds(1.5))
+        XCTAssertEqual(try source.id.value(running) as UInt32, 0, "the microphone stayed open after the reader left")
+    }
+
     /// The monitor is heard while nothing plays into the virtual device: the output proc drains
     /// its tap every cycle, so the ring an input writes into stays near its priming level instead
     /// of filling up.
@@ -331,10 +370,10 @@ final class EngineTests: XCTestCase {
         guard let version = DriverInstaller.installedVersion() else {
             throw XCTSkip("the driver is not installed; run make install first")
         }
-        XCTAssertEqual(version, "0.3.0")
+        XCTAssertEqual(version, "0.4.0")
         //  The test host is not the app bundle, so nothing is bundled to compare against.
         XCTAssertEqual(DriverInstaller.bundledVersion, "")
-        XCTAssertEqual(DriverInstaller.status(), .ready(version: "0.3.0"))
+        XCTAssertEqual(DriverInstaller.status(), .ready(version: "0.4.0"))
     }
 
     /// A set left behind by a run that never restored is what the next run puts back, rather than

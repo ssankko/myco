@@ -145,9 +145,21 @@ struct FeedReader {
 
     private(set) var readFrame: UInt64 = 0
     private(set) var idle = true
+    /// Room beyond the target, earned one pull per underrun. A writer whose timing jitters more
+    /// than two pulls, as a client with a large IO buffer does, gets the margin it needs and keeps it.
+    private(set) var slack: Int
     private var lastWrite: UInt64 = 0
     private var seenWrite = false
     private var generation: UInt64 = 0
+
+    init(slack: Int = 0) { self.slack = slack }
+
+    /// An underrun: the next position sits `frames` further behind, up to `cap`, and the reader
+    /// takes it as soon as the writer moves again.
+    mutating func widen(by frames: Int, upTo cap: Int) {
+        slack = min(cap, slack + frames)
+        idle = true
+    }
 
     /// Answers what the ring holds for this reader, or nil when the output must stay silent: the
     /// driver has not moved since the last cycle it was seen at, or the reader has caught up with
@@ -170,9 +182,10 @@ struct FeedReader {
             // Forwards only: the driver zeroes its position when the device starts again, and a
             // reader that took the jump would sit in front of everything written since.
             guard Int64(bitPattern: write &- lastWrite) > 0 else { return nil }
-            readFrame = write &- UInt64(target)
+            let room = target + slack
+            readFrame = write &- UInt64(room)
             idle = false
-            return Step(fill: target, resynced: true)
+            return Step(fill: room, resynced: true)
         }
         // Modular arithmetic, so a write position that restarted at zero reads as a huge negative
         // fill and sends the reader back to idle.

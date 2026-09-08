@@ -63,18 +63,23 @@ package final class Engine {
         }
     }
 
-    /// Everything `makePlan` reads out of the settings. A change that leaves this alone moves a
-    /// parameter in the running graph and never queries the HAL.
+    /// Everything `makePlan` reads out of the settings and the driver. A change that leaves this
+    /// alone moves a parameter in the running graph and never queries the HAL.
     private struct PlanInputs: Equatable {
         var virtualRate: Double
         /// Every enabled output and the buffer size it asks for.
         var outputs: [String: UInt32?]
         var inputs: Set<String>
+        /// The physical microphones open only while something listens: another process reading
+        /// `Myco Mic`, or a monitor on an enabled output. Idle, they stay closed and macOS shows no
+        /// microphone indicator for Myco.
+        var inputsWanted: Bool
 
-        init(_ settings: Settings) {
+        init(_ settings: Settings, micReaders: Int) {
             virtualRate = settings.virtualRate
             outputs = settings.outputs.filter(\.value.enabled).mapValues(\.bufferFrames)
             inputs = Set(settings.inputs.filter(\.value.enabled).keys)
+            inputsWanted = micReaders > 0 || settings.outputs.values.contains { $0.enabled && $0.monitor }
         }
     }
 
@@ -93,6 +98,8 @@ package final class Engine {
     private var plan = Plan()
     /// What the current plan was made from; nil until the first one.
     private var planInputs: PlanInputs?
+    /// Processes other than Myco running IO on `Myco Mic`, as the driver counts them.
+    private var micReaders = 0
     /// The bands each output last took, so a move of another slider pushes no coefficients.
     private var pushedEQ: [String: [BandSettings]] = [:]
     private var feed: SharedFeed?
@@ -101,6 +108,8 @@ package final class Engine {
     private var micDrain: MicDrainNode?
     private var outputStatus: [String: OutputStatus] = [:]
     private var listeners: [AudioObjectPropertyListener] = []
+    /// One per running output with a volume control of its own, keyed by UID.
+    private var volumeListeners: [String: AudioObjectPropertyListener] = [:]
     private var eventTask: Task<Void, Never>?
     private var statusTask: Task<Void, Never>?
     /// UIDs already reported as playing, so the log line lands once per graph.
@@ -126,7 +135,9 @@ package final class Engine {
             defaultDevices.pin()
         }
         await watchVirtualDevice()
+        await watchMicReaders()
         await readMaster()
+        readMicReaders()
 
         let events = await model.devices.events()
         eventTask = Task { [weak self] in
@@ -154,6 +165,7 @@ package final class Engine {
         statusTask?.cancel()
         statusTask = nil
         listeners = []
+        volumeListeners = [:]
         await teardownInputs(fading: outputs)
         stopOutputs(outputs)
         feed?.unmap()
@@ -215,7 +227,7 @@ package final class Engine {
     private func apply(_ wanted: Settings, replan: Bool = false) async {
         guard running else { return }
         settings = wanted
-        let inputs = PlanInputs(wanted)
+        let inputs = PlanInputs(wanted, micReaders: micReaders)
         if replan || inputs != planInputs {
             planInputs = inputs
             await applyVirtualRate()
@@ -233,6 +245,7 @@ package final class Engine {
                     stopOutputs(stopping)
                     plan = next
                     buildOutputs()
+                    await watchOutputVolumes()
                     buildInputs()
                 }
             } else if next.inputs != plan.inputs {
@@ -293,6 +306,7 @@ package final class Engine {
                     sampleRate: (try? device.nominalSampleRate) ?? 0,
                     bufferFrames: OutputNode.effectiveBufferFrames(device, output(uid).bufferFrames)))
         }
+        guard planInputs?.inputsWanted == true else { return wanted }
         let inputUIDs = Set(settings.inputs.filter(\.value.enabled).keys)
         for uid in Engine.ordered(inputUIDs) where wanted.inputs.count < MonitorTap.maxInputs {
             guard uid != AppModel.micDeviceUID, uid != AppModel.outputDeviceUID,
@@ -376,6 +390,7 @@ package final class Engine {
         guard !uids.isEmpty else { return }
         for node in stopping { node.stop() }
         outputs.removeAll { uids.contains($0.uid) }
+        volumeListeners = volumeListeners.filter { !uids.contains($0.key) }
         outputStatus = outputStatus.filter { !uids.contains($0.key) }
         pushedEQ = pushedEQ.filter { !uids.contains($0.key) }
         playing.subtract(uids)
@@ -437,13 +452,18 @@ package final class Engine {
     // MARK: Parameters
 
     private func pushParameters() {
-        let master = masterMuted ? 0 : Engine.masterLinear(master)
+        let softwareMaster = masterMuted ? 0 : Engine.masterLinear(master)
         for node in outputs {
             let settings = output(node.uid)
             node.gainTarget.value = decibelsToLinear(settings.gainDB)
             node.monitorGainTarget.value =
                 settings.monitor && !plan.inputs.isEmpty ? decibelsToLinear(settings.monitorGainDB) : 0
-            node.masterTarget.value = master
+            if node.hasVolumeControl {
+                setDeviceVolume(node, master)
+                node.masterTarget.value = masterMuted ? 0 : 1
+            } else {
+                node.masterTarget.value = softwareMaster
+            }
             if settings.eq.count == Equalizer.bandCount, pushedEQ[node.uid] != settings.eq {
                 node.eq.setBands(settings.eq)
                 pushedEQ[node.uid] = settings.eq
@@ -478,7 +498,11 @@ package final class Engine {
     /// Copies what the IO threads counted into the status the UI reads.
     func pollCounters() async {
         for node in outputs {
-            outputStatus[node.uid]?.underruns = node.underruns.value
+            let underruns = node.underruns.value
+            if underruns != outputStatus[node.uid]?.underruns {
+                log.info("output \(node.uid, privacy: .public) underruns \(underruns)")
+            }
+            outputStatus[node.uid]?.underruns = underruns
             let frames = node.frames.value
             if frames > 0, playing.insert(node.uid).inserted {
                 log.info("output \(node.uid, privacy: .public) is playing, \(frames) frames read")
@@ -526,6 +550,77 @@ package final class Engine {
                 }
             }
         }
+    }
+
+    /// A device's control moves in steps, an AirPods one in sixteen, so a value that reads back
+    /// within this of the master is the master.
+    private static let volumeTolerance: Float = 0.005
+
+    /// Writes the master to a device's own control, unless it is already there.
+    private func setDeviceVolume(_ node: OutputNode, _ scalar: Float) {
+        guard let current = (try? node.device.volumeScalar(scope: .output)) ?? nil,
+            abs(current - scalar) > Engine.volumeTolerance
+        else { return }
+        try? node.device.setVolumeScalar(scalar, scope: .output)
+    }
+
+    /// Follows the volume control of every running output that has one, so a level changed on
+    /// the device itself, as a swipe on an AirPods stem does, becomes the master.
+    private func watchOutputVolumes() async {
+        for node in outputs where node.hasVolumeControl && volumeListeners[node.uid] == nil {
+            let (id, uid) = (node.device.id, node.uid)
+            let listener = await MainActor.run {
+                try? AudioObjectPropertyListener(
+                    id,
+                    AudioObjectPropertyAddress(
+                        kAudioDevicePropertyVolumeScalar, kAudioObjectPropertyScopeOutput,
+                        kAudioObjectPropertyElementWildcard)
+                ) { [weak self] _ in
+                    Task { await self?.deviceVolumeChanged(uid) }
+                }
+            }
+            volumeListeners[uid] = listener
+        }
+    }
+
+    /// The master follows the device: the virtual device's control takes the new level, and its
+    /// own listener then carries it to the model and to every other output.
+    private func deviceVolumeChanged(_ uid: String) {
+        guard let node = outputs.first(where: { $0.uid == uid }), let virtual = virtualDevice,
+            let scalar = (try? node.device.volumeScalar(scope: .output)) ?? nil,
+            abs(scalar - master) > Engine.volumeTolerance
+        else { return }
+        try? virtual.setVolumeScalar(scalar, scope: .output)
+    }
+
+    /// `'mxci'`, the driver's count of clients other than the app running IO on a device.
+    private nonisolated static let clientIOSelector = AudioObjectPropertySelector(0x6D78_6369)
+
+    /// Follows the reader count of `Myco Mic`, so the microphones open when an app starts to
+    /// listen and close when the last one stops. The HAL hands a client the value it last read
+    /// until the driver posts a change, so the count is read only on a change.
+    private func watchMicReaders() async {
+        guard let device = micDevice else { return }
+        let listener = await MainActor.run {
+            try? AudioObjectPropertyListener(
+                device.id, AudioObjectPropertyAddress(Engine.clientIOSelector)
+            ) { [weak self] _ in
+                Task { await self?.micReadersChanged() }
+            }
+        }
+        if let listener { listeners.append(listener) }
+    }
+
+    private func micReadersChanged() async {
+        readMicReaders()
+        log.info("mic readers \(self.micReaders)")
+        await apply(settings)
+    }
+
+    /// A driver without the property, one older than this app, keeps the microphones open.
+    private func readMicReaders() {
+        guard let device = micDevice else { return }
+        micReaders = Int((try? device.id.string(AudioObjectPropertyAddress(Engine.clientIOSelector))) ?? "") ?? 1
     }
 
     private func readMaster() async {

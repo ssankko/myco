@@ -56,6 +56,26 @@ final class DriverLoopbackTests: XCTestCase {
         return hidden
     }
 
+    // MARK: - Client IO count
+
+    /// `'mxci'` on `Myco Mic` counts the processes reading it, so the app knows when to open a
+    /// physical microphone; each reader that starts adds one and each that stops takes it away.
+    @MainActor
+    func testMicClientIOCountFollowsTheReaders() async throws {
+        guard let mic = device(uid: Self.micUID) else { throw XCTSkip("Myco Mic is absent; run make install first") }
+        let address = AudioObjectPropertyAddress(AudioObjectPropertySelector(0x6D78_6369))
+        let before = try XCTUnwrap(Int(try mic.string(address)), "the count is a decimal string")
+
+        let capture = try Capture(device: AudioDevice(id: mic), seconds: 1)
+        try capture.start()
+        // The HAL serves a cached value until the driver's change notification lands.
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertEqual(Int(try mic.string(address)), before + 1)
+        _ = capture.stop()
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertEqual(Int(try mic.string(address)), before)
+    }
+
     // MARK: - Loopback
 
     /// Plays a 1 kHz sine into the device for `seconds` and answers the root mean square of what

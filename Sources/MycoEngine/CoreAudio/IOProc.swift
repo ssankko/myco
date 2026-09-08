@@ -20,8 +20,13 @@ final class IOProc {
     nonisolated(unsafe) private var procID: AudioDeviceIOProcID?
 
     /// Creates the IO proc. `bufferFrameSize`, when given, is applied to the device first, which
-    /// affects this process only; pass a value inside `device.bufferFrameSizeRange`.
-    init(device: AudioDevice, bufferFrameSize: UInt32? = nil, callback: @escaping Callback) throws {
+    /// affects this process only; pass a value inside `device.bufferFrameSizeRange`. With
+    /// `usesInput` false the HAL does no input work for this proc, and a driver that counts the
+    /// readers of a device does not count it.
+    init(
+        device: AudioDevice, bufferFrameSize: UInt32? = nil, usesInput: Bool = true,
+        callback: @escaping Callback
+    ) throws {
         self.device = device
         if let bufferFrameSize { try device.setBufferFrameSize(bufferFrameSize) }
         let block: AudioDeviceIOBlock = { now, inputData, inputTime, outputData, outputTime in
@@ -34,6 +39,27 @@ final class IOProc {
         try device.id.check(
             AudioDeviceCreateIOProcIDWithBlock(&procID, device.id, nil, block),
             AudioObjectPropertyAddress(kAudioDevicePropertyIOProcStreamUsage))
+        if !usesInput { try turnOffInputStreams() }
+    }
+
+    /// The usage record is a header followed by one flag per stream, so it is built in raw memory.
+    private func turnOffInputStreams() throws {
+        let count = (try? device.streams(scope: .input).count) ?? 0
+        guard count > 0, let procID else { return }
+        let bytes =
+            MemoryLayout<AudioHardwareIOProcStreamUsage>.offset(of: \.mStreamIsOn)!
+            + count * MemoryLayout<UInt32>.size
+        let raw = UnsafeMutableRawPointer.allocate(
+            byteCount: bytes, alignment: MemoryLayout<AudioHardwareIOProcStreamUsage>.alignment)
+        defer { raw.deallocate() }
+        raw.initializeMemory(as: UInt8.self, repeating: 0, count: bytes)
+        let usage = raw.assumingMemoryBound(to: AudioHardwareIOProcStreamUsage.self)
+        usage.pointee.mIOProc = unsafeBitCast(procID, to: UnsafeMutableRawPointer.self)
+        usage.pointee.mNumberStreams = UInt32(count)
+        var address = AudioObjectPropertyAddress(
+            kAudioDevicePropertyIOProcStreamUsage, kAudioObjectPropertyScopeInput)
+        try device.id.check(
+            AudioObjectSetPropertyData(device.id, &address, 0, nil, UInt32(bytes), raw), address)
     }
 
     func start() throws {

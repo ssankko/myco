@@ -123,6 +123,33 @@ final class SharedFeedTests: XCTestCase {
         XCTAssertEqual(reader.readFrame, 1200)
     }
 
+    /// An underrun widens the margin by what the caller asks, up to the cap, and the reader takes
+    /// the wider position as soon as the writer moves.
+    func testAnUnderrunWidensTheMargin() {
+        var reader = FeedReader()
+        _ = reader.step(write: 1000, generation: 1, target: 300)
+        _ = reader.step(write: 1200, generation: 1, target: 300)
+
+        reader.widen(by: 50, upTo: 80)
+        XCTAssertTrue(reader.idle)
+        XCTAssertNil(reader.step(write: 1200, generation: 1, target: 300), "the writer stands still")
+        let wider = reader.step(write: 1500, generation: 1, target: 300)
+        XCTAssertEqual(wider?.fill, 350)
+        XCTAssertEqual(reader.readFrame, 1150)
+
+        reader.widen(by: 50, upTo: 80)
+        XCTAssertEqual(reader.slack, 80, "the cap holds")
+    }
+
+    /// A reader born with slack takes its first position that much further behind the writer.
+    func testAReaderCanStartWithSlack() {
+        var reader = FeedReader(slack: 80)
+        _ = reader.step(write: 1000, generation: 1, target: 300)
+        let step = reader.step(write: 1200, generation: 1, target: 300)
+        XCTAssertEqual(step?.fill, 380)
+        XCTAssertEqual(reader.readFrame, 820)
+    }
+
     /// A driver that loaded again restarts its positions, so the reader drops the one it had.
     func testAGenerationChangeStartsOver() {
         var reader = FeedReader()

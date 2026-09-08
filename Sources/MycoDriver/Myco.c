@@ -8,6 +8,7 @@
 #include <CoreAudio/AudioHardware.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <dispatch/dispatch.h>
 #include <mach/mach_time.h>
 #include <math.h>
 #include <os/log.h>
@@ -21,7 +22,7 @@
 #pragma mark - Configuration
 
 //  The one place the driver version lives; the app reads it through the 'mxvr' custom property.
-#define kDriverVersion  CFSTR("0.3.0")
+#define kDriverVersion  CFSTR("0.4.0")
 
 #define kBoxUID         CFSTR("com.ssankko.myco.box")
 #define kManufacturer   CFSTR("Myco")
@@ -42,6 +43,17 @@ enum
 
 //  Custom property on the plug-in object, a CFString carrying kDriverVersion.
 #define kPlugInCustomProperty_Version ((AudioObjectPropertySelector)'mxvr')
+
+//  Custom property on `Myco Mic`, a CFString carrying the number of clients that read it within
+//  kIOClientTimeout, not counting the app. That tells the app whether anything listens before it
+//  opens a physical microphone. The host reports StartIO and StopIO for the device as a whole and
+//  reads the ring once per cycle, so the per-client ProcessInput operation is what shows a reader
+//  coming and going, and a timer posts a change when the count moves, because a client caches
+//  the value until it is told otherwise.
+#define kDeviceCustomProperty_ClientIO ((AudioObjectPropertySelector)'mxci')
+#define kIOClientTimeout        0.5
+#define kIOClientPollSeconds    0.25
+#define kMaxIOClients           32
 
 //  Power of two so a sample time maps to a ring index with a mask. 65536 frames hold sixteen
 //  buffers of 4096, the largest IO size the HAL asks for, at any supported rate.
@@ -91,6 +103,9 @@ typedef struct
     UInt32                      mInputStreamActive;
     UInt32                      mOutputStreamActive;
     UInt32                      mIOCount;
+    //  Slot per client seen on the IO thread; mClientID holds the ID plus one so zero means free.
+    struct { _Atomic UInt32 mClientID; _Atomic UInt64 mLastCycle; } mIOClients[kMaxIOClients];
+    UInt32                      mNotifiedClientIO;
     Float32                     mVolumeScalar;
     UInt32                      mMute;
 
@@ -148,6 +163,7 @@ static DeviceState gDevices[2] =
 
 static pthread_mutex_t          gStateMutex = PTHREAD_MUTEX_INITIALIZER;
 static AudioServerPlugInHostRef gHost = NULL;
+static dispatch_source_t        gClientIOTimer = NULL;
 static UInt32                   gBoxAcquired = 1;
 static Float64                  gHostTicksPerSecond = 1.0e9;
 
@@ -158,7 +174,75 @@ static pid_t    gAppPIDs[kMaxAppProcesses];
 static UInt32   gAppRefs[kMaxAppProcesses];
 static UInt32   gAppProcessCount = 0;
 
+//  The client IDs the app holds, one per device it is attached to, so its own IO never counts
+//  as a client's.
+#define kMaxAppClients (2 * kMaxAppProcesses)
+static UInt32   gAppClientIDs[kMaxAppClients];
+static UInt32   gAppClientCount = 0;
+
 #pragma mark - Helpers
+
+static Boolean IsAppClient(UInt32 inClientID);
+
+static UInt64 IOClientTimeoutTicks(void)
+{
+    return (UInt64)(gHostTicksPerSecond * kIOClientTimeout);
+}
+
+//  Stamps the client's slot with the current host time, claiming a free or stale slot for a client
+//  seen for the first time. Realtime safe: a scan of the slots and a compare-and-swap, no lock.
+static void NoteIOClient(DeviceState* inDevice, UInt32 inClientID)
+{
+    UInt32 theKey = inClientID + 1;
+    UInt64 theNow = mach_absolute_time();
+    for(UInt32 theIndex = 0; theIndex < kMaxIOClients; ++theIndex)
+    {
+        if(atomic_load_explicit(&inDevice->mIOClients[theIndex].mClientID, memory_order_relaxed) == theKey)
+        {
+            atomic_store_explicit(&inDevice->mIOClients[theIndex].mLastCycle, theNow, memory_order_relaxed);
+            return;
+        }
+    }
+    UInt64 theStale = theNow - IOClientTimeoutTicks();
+    for(UInt32 theIndex = 0; theIndex < kMaxIOClients; ++theIndex)
+    {
+        UInt32 theHeld = atomic_load_explicit(&inDevice->mIOClients[theIndex].mClientID, memory_order_relaxed);
+        if((theHeld != 0) &&
+           (atomic_load_explicit(&inDevice->mIOClients[theIndex].mLastCycle, memory_order_relaxed) >= theStale)) continue;
+        if(atomic_compare_exchange_strong(&inDevice->mIOClients[theIndex].mClientID, &theHeld, theKey))
+        {
+            atomic_store_explicit(&inDevice->mIOClients[theIndex].mLastCycle, theNow, memory_order_relaxed);
+            return;
+        }
+    }
+}
+
+static void ForgetIOClient(DeviceState* inDevice, UInt32 inClientID)
+{
+    UInt32 theKey = inClientID + 1;
+    for(UInt32 theIndex = 0; theIndex < kMaxIOClients; ++theIndex)
+    {
+        if(atomic_load_explicit(&inDevice->mIOClients[theIndex].mClientID, memory_order_relaxed) == theKey)
+        {
+            atomic_store_explicit(&inDevice->mIOClients[theIndex].mLastCycle, 0, memory_order_relaxed);
+        }
+    }
+}
+
+//  Clients other than the app seen within kIOClientTimeout. Called with gStateMutex held.
+static UInt32 CountIOClients(const DeviceState* inDevice)
+{
+    UInt64 theSince = mach_absolute_time() - IOClientTimeoutTicks();
+    UInt32 theCount = 0;
+    for(UInt32 theIndex = 0; theIndex < kMaxIOClients; ++theIndex)
+    {
+        UInt32 theKey = atomic_load_explicit(&inDevice->mIOClients[theIndex].mClientID, memory_order_relaxed);
+        if((theKey == 0) || IsAppClient(theKey - 1)) continue;
+        if(atomic_load_explicit(&inDevice->mIOClients[theIndex].mLastCycle, memory_order_relaxed) < theSince) continue;
+        ++theCount;
+    }
+    return theCount;
+}
 
 static DeviceState* DeviceForObjectID(AudioObjectID inObjectID)
 {
@@ -539,6 +623,22 @@ static OSStatus Device_GetProperty(const DeviceState* inDevice, const AudioObjec
 
         case kAudioDevicePropertyDeviceIsRunning:
             RETURN_SCALAR(UInt32, (inDevice->mIOCount > 0) ? 1 : 0);
+
+        case kAudioObjectPropertyCustomPropertyInfoList:
+        {
+            AudioServerPlugInCustomPropertyInfo theInfo =
+            {
+                kDeviceCustomProperty_ClientIO,
+                kAudioServerPlugInCustomPropertyDataTypeCFString,
+                kAudioServerPlugInCustomPropertyDataTypeNone
+            };
+            return ReturnArray(&theInfo, sizeof(theInfo), (inDevice->mInputStreamID != kAudioObjectUnknown) ? 1 : 0,
+                               inDataSize, outDataSize, outData);
+        }
+
+        case kDeviceCustomProperty_ClientIO:
+            if(inDevice->mInputStreamID == kAudioObjectUnknown) return kAudioHardwareUnknownPropertyError;
+            RETURN_SCALAR(CFStringRef, CFStringCreateWithFormat(NULL, NULL, CFSTR("%u"), CountIOClients(inDevice)));
 
         //  Each device offers itself for one direction only, so the other direction never becomes
         //  a default and the system keeps its real device there.
@@ -1022,6 +1122,20 @@ static Boolean TrackAppClient(const AudioServerPlugInClientInfo* inClientInfo, B
     if((inClientInfo == NULL) || (inClientInfo->mBundleID == NULL)) return false;
     if(!CFEqual(inClientInfo->mBundleID, kAppBundleID)) return false;
 
+    if(inAttaching)
+    {
+        if(gAppClientCount < kMaxAppClients) gAppClientIDs[gAppClientCount++] = inClientInfo->mClientID;
+    }
+    else
+    {
+        for(UInt32 theIndex = 0; theIndex < gAppClientCount; ++theIndex)
+        {
+            if(gAppClientIDs[theIndex] != inClientInfo->mClientID) continue;
+            gAppClientIDs[theIndex] = gAppClientIDs[--gAppClientCount];
+            break;
+        }
+    }
+
     UInt32 theBefore = gAppProcessCount;
     UInt32 theFree = kMaxAppProcesses;
 
@@ -1054,6 +1168,49 @@ static Boolean TrackAppClient(const AudioServerPlugInClientInfo* inClientInfo, B
     return gAppProcessCount != theBefore;
 }
 
+static Boolean IsAppClient(UInt32 inClientID)
+{
+    for(UInt32 theIndex = 0; theIndex < gAppClientCount; ++theIndex)
+    {
+        if(gAppClientIDs[theIndex] == inClientID) return true;
+    }
+    return false;
+}
+
+static void NotifyClientIOChanged(AudioServerPlugInHostRef inHost, const DeviceState* inDevice)
+{
+    if(inHost == NULL) return;
+    AudioObjectPropertyAddress theAddress =
+        { kDeviceCustomProperty_ClientIO, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
+    inHost->PropertiesChanged(inHost, inDevice->mDeviceID, 1, &theAddress);
+}
+
+//  Posts a change for the count on every device that carries it, whenever the count moved since
+//  the last post. Runs on its own queue, so the IO thread never talks to the host.
+static void PollClientIO(void* inContext)
+{
+    (void)inContext;
+    pthread_mutex_lock(&gStateMutex);
+    AudioServerPlugInHostRef theHost = gHost;
+    DeviceState* theChanged[2];
+    UInt32 theChangedCount = 0;
+    for(UInt32 theIndex = 0; theIndex < 2; ++theIndex)
+    {
+        DeviceState* theDevice = &gDevices[theIndex];
+        if(theDevice->mInputStreamID == kAudioObjectUnknown) continue;
+        UInt32 theCount = CountIOClients(theDevice);
+        if(theCount == theDevice->mNotifiedClientIO) continue;
+        theDevice->mNotifiedClientIO = theCount;
+        theChanged[theChangedCount++] = theDevice;
+    }
+    pthread_mutex_unlock(&gStateMutex);
+
+    for(UInt32 theIndex = 0; theIndex < theChangedCount; ++theIndex)
+    {
+        NotifyClientIOChanged(theHost, theChanged[theIndex]);
+    }
+}
+
 static void NotifyHiddenChanged(AudioServerPlugInHostRef inHost)
 {
     if(inHost == NULL) return;
@@ -1083,6 +1240,13 @@ static OSStatus Myco_Initialize(AudioServerPlugInDriverRef inDriver, AudioServer
     }
     FeedCreate(&gDevices[0]);
     pthread_mutex_unlock(&gStateMutex);
+
+    gClientIOTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
+                                            dispatch_queue_create("com.ssankko.myco.driver.clients", DISPATCH_QUEUE_SERIAL));
+    dispatch_source_set_timer(gClientIOTimer, DISPATCH_TIME_NOW,
+                              (uint64_t)(kIOClientPollSeconds * NSEC_PER_SEC), NSEC_PER_SEC / 20);
+    dispatch_source_set_event_handler_f(gClientIOTimer, PollClientIO);
+    dispatch_resume(gClientIOTimer);
 
     os_log(OS_LOG_DEFAULT, "Myco: driver initialised, version %@", kDriverVersion);
     return 0;
@@ -1437,7 +1601,7 @@ static OSStatus Myco_SetPropertyData(AudioServerPlugInDriverRef inDriver, AudioO
 
 static OSStatus Myco_StartIO(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, UInt32 inClientID)
 {
-    (void)inDriver; (void)inClientID;
+    (void)inDriver;
     DeviceState* theDevice = DeviceForObjectID(inDeviceObjectID);
     if((theDevice == NULL) || (inDeviceObjectID != theDevice->mDeviceID)) return kAudioHardwareBadObjectError;
 
@@ -1449,21 +1613,38 @@ static OSStatus Myco_StartIO(AudioServerPlugInDriverRef inDriver, AudioObjectID 
         RingReset(theDevice);
     }
     ++theDevice->mIOCount;
+    //  Stamped here as well, so the app finds the client counted before its first cycle runs.
+    Boolean theIsClient = !IsAppClient(inClientID) && (theDevice->mInputStreamID != kAudioObjectUnknown);
+    if(theIsClient)
+    {
+        NoteIOClient(theDevice, inClientID);
+        theDevice->mNotifiedClientIO = CountIOClients(theDevice);
+    }
+    AudioServerPlugInHostRef theHost = gHost;
     pthread_mutex_unlock(&gStateMutex);
 
+    if(theIsClient) NotifyClientIOChanged(theHost, theDevice);
     return 0;
 }
 
 static OSStatus Myco_StopIO(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, UInt32 inClientID)
 {
-    (void)inDriver; (void)inClientID;
+    (void)inDriver;
     DeviceState* theDevice = DeviceForObjectID(inDeviceObjectID);
     if((theDevice == NULL) || (inDeviceObjectID != theDevice->mDeviceID)) return kAudioHardwareBadObjectError;
 
     pthread_mutex_lock(&gStateMutex);
     if(theDevice->mIOCount > 0) --theDevice->mIOCount;
+    Boolean theIsClient = !IsAppClient(inClientID) && (theDevice->mInputStreamID != kAudioObjectUnknown);
+    if(theIsClient)
+    {
+        ForgetIOClient(theDevice, inClientID);
+        theDevice->mNotifiedClientIO = CountIOClients(theDevice);
+    }
+    AudioServerPlugInHostRef theHost = gHost;
     pthread_mutex_unlock(&gStateMutex);
 
+    if(theIsClient) NotifyClientIOChanged(theHost, theDevice);
     return 0;
 }
 
@@ -1499,9 +1680,11 @@ static OSStatus Myco_WillDoIOOperation(AudioServerPlugInDriverRef inDriver, Audi
     DeviceState* theDevice = DeviceForObjectID(inDeviceObjectID);
     if((theDevice == NULL) || (inDeviceObjectID != theDevice->mDeviceID)) return kAudioHardwareBadObjectError;
 
+    //  ProcessInput runs once per reading client, which is how the device learns who reads it.
+    Boolean theHasInput = (theDevice->mInputStreamID != kAudioObjectUnknown);
     *outWillDo = (inOperationID == kAudioServerPlugInIOOperationWriteMix) ||
-                 ((inOperationID == kAudioServerPlugInIOOperationReadInput) &&
-                  (theDevice->mInputStreamID != kAudioObjectUnknown));
+                 (theHasInput && ((inOperationID == kAudioServerPlugInIOOperationReadInput) ||
+                                  (inOperationID == kAudioServerPlugInIOOperationProcessInput)));
     *outWillDoInPlace = true;
     return 0;
 }
@@ -1524,11 +1707,17 @@ static OSStatus Myco_DoIOOperation(AudioServerPlugInDriverRef inDriver, AudioObj
                                        UInt32 inIOBufferFrameSize, const AudioServerPlugInIOCycleInfo* inIOCycleInfo,
                                        void* ioMainBuffer, void* ioSecondaryBuffer)
 {
-    (void)inDriver; (void)inStreamObjectID; (void)inClientID; (void)ioSecondaryBuffer;
+    (void)inDriver; (void)inStreamObjectID; (void)ioSecondaryBuffer;
 
     DeviceState* theDevice = DeviceForObjectID(inDeviceObjectID);
     if((theDevice == NULL) || (inDeviceObjectID != theDevice->mDeviceID)) return kAudioHardwareBadObjectError;
     if(inIOCycleInfo == NULL) return 0;
+
+    if(inOperationID == kAudioServerPlugInIOOperationProcessInput)
+    {
+        NoteIOClient(theDevice, inClientID);
+        return 0;
+    }
 
     if(inOperationID == kAudioServerPlugInIOOperationWriteMix)
     {

@@ -236,8 +236,14 @@ struct OutputRender: @unchecked Sendable {
     private let monitor: UnsafeMutablePointer<Float>
     private let state: UnsafeMutablePointer<State>
 
+    /// Pulls of margin an underrun can earn in total. A Bluetooth output starts with all of them:
+    /// its link already holds a hundred milliseconds or more, so the margin costs nothing audible,
+    /// and it spares the clicks a jittery writer would otherwise pay to earn it.
+    static let maxSlackPulls = 8
+
     init(
-        feed: SharedFeed, virtualRate: Double, sampleRate: Double, bufferFrames: Int, gainDB: Float
+        feed: SharedFeed, virtualRate: Double, sampleRate: Double, bufferFrames: Int, gainDB: Float,
+        wideMargin: Bool = false
     ) {
         self.feed = feed
         self.bufferFrames = bufferFrames
@@ -247,12 +253,13 @@ struct OutputRender: @unchecked Sendable {
         // One IO cycle of this output, in the ring's frames, plus what the resampler needs around it.
         pull =
             Int((Double(bufferFrames) * baseRatio * 1.01).rounded(.up)) + 2 * resampler.tapsPerSide + 8
+        let slack = wideMargin ? OutputRender.maxSlackPulls * pull : 0
         // The drift gain is a tenth of the default because the averaged fill still wanders tens of
         // frames, and this keeps that wander under a tenth of a per cent of pitch instead of an
         // audible slow wow. The target itself follows the driver's block at every resync.
         let follower = ClockFollower(
             targetFillFrames: Double(
-                FeedReader.targetFill(writeBlock: feed.writeBlockFrames, pull: pull)),
+                FeedReader.targetFill(writeBlock: feed.writeBlockFrames, pull: pull) + slack),
             gain: 1e-5)
         ringFill = Int((follower.drift.targetFillFrames / baseRatio).rounded())
 
@@ -271,7 +278,7 @@ struct OutputRender: @unchecked Sendable {
         state.initialize(
             to: State(
                 resampler: resampler,
-                reader: FeedReader(),
+                reader: FeedReader(slack: slack),
                 follower: follower,
                 gain: SmoothedGain(sampleRate: sampleRate, decibels: gainDB),
                 monitorGain: SmoothedGain(sampleRate: sampleRate, decibels: silenceDecibels),
@@ -331,7 +338,7 @@ struct OutputRender: @unchecked Sendable {
             return false
         }
         if step.resynced {
-            state.pointee.follower.aim(target: Double(target), producerBlock: Double(writeBlock))
+            state.pointee.follower.aim(target: Double(step.fill), producerBlock: Double(writeBlock))
         }
 
         state.pointee.resampler.ratio =
@@ -341,6 +348,7 @@ struct OutputRender: @unchecked Sendable {
         feed.read(from: state.pointee.reader.readFrame, into: feedScratch, frames: taken)
         if taken < need {
             underruns.add(1)
+            state.pointee.reader.widen(by: pull, upTo: OutputRender.maxSlackPulls * pull)
             feedScratch.advanced(by: taken * 2).update(repeating: 0, count: (need - taken) * 2)
         }
         state.pointee.reader.advance(taken)
@@ -378,6 +386,8 @@ package final class OutputNode {
     let bufferFrames: Int
     let latency: OutputLatency
     let render: OutputRender
+    /// True when the device has a volume control of its own, which then carries the master level.
+    let hasVolumeControl: Bool
 
     var tap: MonitorTap { render.tap }
     var eq: Equalizer { render.eq }
@@ -404,10 +414,12 @@ package final class OutputNode {
         let wanted = OutputNode.effectiveBufferFrames(device, settings.bufferFrames)
         try? device.setBufferFrameSize(wanted)
         bufferFrames = Int((try? device.bufferFrameSize) ?? wanted)
+        hasVolumeControl = ((try? device.volumeScalar(scope: .output)) ?? nil) != nil
 
         let render = OutputRender(
             feed: feed, virtualRate: virtualRate, sampleRate: sampleRate,
-            bufferFrames: bufferFrames, gainDB: settings.gainDB)
+            bufferFrames: bufferFrames, gainDB: settings.gainDB,
+            wideMargin: OutputNode.isBluetooth(device.transportType))
         self.render = render
         latency = OutputLatency(
             deviceLatency: Int((try? device.latency(scope: .output)) ?? 0),
@@ -423,9 +435,13 @@ package final class OutputNode {
         }
     }
 
+    nonisolated static func isBluetooth(_ transport: AudioDevice.TransportType) -> Bool {
+        transport == .bluetooth || transport == .bluetoothLE
+    }
+
     /// 256 frames for Bluetooth, which cannot keep up with less, and 128 for everything else.
     package nonisolated static func defaultBufferFrames(_ transport: AudioDevice.TransportType) -> UInt32 {
-        transport == .bluetooth || transport == .bluetoothLE ? 256 : 128
+        isBluetooth(transport) ? 256 : 128
     }
 
     /// The size the device runs at once this node has it: the setting or the transport default,
@@ -539,7 +555,7 @@ final class MicDrainNode {
         let tapCopy = tap
         nonisolated(unsafe) let mono = self.mono
         let blockFrames = self.blockFrames
-        proc = try IOProc(device: device) { _, _, _, output, _ in
+        proc = try IOProc(device: device, usesInput: false) { _, _, _, output, _ in
             guard let output else { return }
             let count = min(bufferListFrames(output), blockFrames)
             guard count > 0 else { return }

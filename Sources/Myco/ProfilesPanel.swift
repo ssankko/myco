@@ -3,48 +3,13 @@ import IOBluetooth
 import MycoEngine
 import SwiftUI
 
-/// The one window that edits profiles. Kept once made; opens beside the popover.
-@MainActor
-enum ProfilesWindow {
-    private static var window: NSWindow?
-
-    static func show(model: AppModel) {
-        let window = window ?? make(model: model)
-        self.window = window
-        window.placeBesidePopover()
-        window.makeKeyAndOrderFront(nil)
-        NSApplication.shared.activate()
-    }
-
-    private static func make(model: AppModel) -> NSWindow {
-        let host = NSHostingController(rootView: ProfilesView(model: model))
-        host.sizingOptions = [.preferredContentSize]
-        let window = NSWindow(contentViewController: host)
-        window.title = "Profiles"
-        window.styleMask = [.titled, .closable, .miniaturizable]
-        window.isReleasedWhenClosed = false
-        window.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
-        return window
-    }
-}
-
-extension NSWindow {
-    /// Puts the window to the left of the popover, top edges level, so it never covers it. The
-    /// popover is the key window while one of its buttons opens this one.
-    func placeBesidePopover() {
-        guard let popover = NSApplication.shared.keyWindow, popover != self else { return }
-        layoutIfNeeded()
-        let size = frame.size
-        let screen = (popover.screen ?? NSScreen.main)?.visibleFrame ?? popover.frame
-        let x = max(screen.minX, popover.frame.minX - size.width - 12)
-        let y = max(screen.minY, min(popover.frame.maxY, screen.maxY) - size.height)
-        setFrameOrigin(NSPoint(x: x, y: y))
-    }
-}
-
-/// Profiles on the left, the selected one's devices on the right.
-private struct ProfilesView: View {
+/// Profiles on the left, the selected one's devices on the right. Every device a profile knows
+/// is listed, connected or not, with the settings the profile keeps for it.
+struct ProfilesPanel: View {
     @Bindable var model: AppModel
+    let panels: Panels
+    /// The panel's height, set by the column beside it; the device list scrolls inside what is left.
+    let height: CGFloat
 
     @State private var selected: UUID?
 
@@ -53,15 +18,19 @@ private struct ProfilesView: View {
     }
 
     var body: some View {
-        HStack(alignment: .top, spacing: 14) {
-            list.frame(width: 150)
-            Divider()
-            if let index {
-                editor(index)
+        VStack(alignment: .leading, spacing: Theme.sectionGap) {
+            PanelHeader(title: "Profiles", panels: panels) {}
+            HStack(alignment: .top, spacing: 14) {
+                list.frame(width: 150)
+                Divider()
+                if let index {
+                    editor(index)
+                }
             }
+            .frame(maxHeight: .infinity)
         }
-        .padding(18)
-        .frame(width: 560, height: 440, alignment: .topLeading)
+        .padding(14)
+        .frame(width: 560, height: height, alignment: .topLeading)
         .onAppear { selected = selected ?? model.settings.activeProfileID }
         .onChange(of: model.settings.profiles.map(\.id)) { _, ids in
             if !ids.contains(where: { $0 == selected }) { selected = model.settings.activeProfileID }
@@ -141,11 +110,32 @@ private struct ProfilesView: View {
                     devices(
                         "Outputs", known: model.settings.outputNames,
                         connected: model.devices.outputs.routable,
-                        profile: index, enabled: \.outputs)
+                        settings: $model.settings.profiles[index].outputs
+                    ) { name, settings in
+                        MeterSlider(
+                            label: "\(name) volume", value: settings.gainDB.asDouble,
+                            range: -60...12, step: 0.5,
+                            readout: "\(Readout.decibels(settings.wrappedValue.gainDB)) dB",
+                            readoutWidth: 58, reset: 0)
+                        GlyphToggle(
+                            label: "Monitor microphones on \(name)", symbol: "ear",
+                            isOn: settings.monitor)
+                    }
                     devices(
                         "Inputs", known: model.settings.inputNames,
                         connected: model.devices.inputs.routable,
-                        profile: index, enabled: \.inputs)
+                        settings: $model.settings.profiles[index].inputs
+                    ) { name, settings in
+                        MeterSlider(
+                            label: "\(name) gain", value: settings.gainDB.asDouble,
+                            range: -60...24, step: 0.5,
+                            readout: "\(Readout.decibels(settings.wrappedValue.gainDB)) dB",
+                            readoutWidth: 58, reset: 0)
+                        GlyphToggle(
+                            label: "Mute \(name)",
+                            symbol: settings.wrappedValue.muted ? "mic.slash" : "mic",
+                            isOn: settings.muted)
+                    }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -153,18 +143,18 @@ private struct ProfilesView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    /// One toggle per device the profile could turn on. A device that is away shows its name and
-    /// a tag, so it can be set up before it connects.
-    private func devices<S: DeviceSettingsLike>(
-        _ title: String, known: [String: String], connected: [DeviceEntry], profile: Int,
-        enabled: WritableKeyPath<Profile, [String: S]>
+    /// One row per device the profile could turn on, with the controls the profile keeps for it
+    /// once it is on. A device that is away shows its name and a tag, so it can be set up before
+    /// it connects.
+    private func devices<S: DeviceSettingsLike, Controls: View>(
+        _ title: String, known: [String: String], connected: [DeviceEntry],
+        settings: Binding<[String: S]>,
+        @ViewBuilder controls: @escaping (String, Binding<S>) -> Controls
     ) -> some View {
         let live = Dictionary(uniqueKeysWithValues: connected.map { ($0.id, $0.name) })
         var names: [String: String] = [:]
         if !model.settings.showOnlyConnected {
-            for profile in model.settings.profiles {
-                for uid in profile[keyPath: enabled].keys { names[uid] = DeviceNames.guess(uid) }
-            }
+            for uid in settings.wrappedValue.keys { names[uid] = DeviceNames.guess(uid) }
             names.merge(known) { _, seen in seen }
         }
         names.merge(live) { _, current in current }
@@ -175,38 +165,56 @@ private struct ProfilesView: View {
                 Text("None").font(.system(size: 11)).foregroundStyle(.tertiary).padding(.leading, 9)
             }
             ForEach(rows, id: \.key) { uid, name in
-                HStack(spacing: 6) {
-                    Toggle(
-                        name,
-                        isOn: Binding(
-                            get: { model.settings.profiles[profile][keyPath: enabled][uid]?.enabled ?? false },
-                            set: { on in
-                                model.settings.profiles[profile][keyPath: enabled][uid, default: S.fresh].enabled = on
-                            }))
-                        .toggleStyle(.switch)
-                        .controlSize(.mini)
-                        .tint(Theme.signal)
-                        .labelsHidden()
-                        .accessibilityLabel("\(name) in this profile")
-                    Text(name)
-                        .font(.system(size: 12, weight: .medium))
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                    Spacer(minLength: 6)
-                    if live[uid] == nil {
-                        Text("Not connected")
-                            .font(.system(size: 10.5))
-                            .foregroundStyle(.tertiary)
-                    }
-                }
-                .padding(.horizontal, 9)
-                .padding(.vertical, 5)
+                ProfileDeviceRow(
+                    name: name, isConnected: live[uid] != nil,
+                    settings: Binding(
+                        get: { settings.wrappedValue[uid] ?? S.fresh },
+                        set: { settings.wrappedValue[uid] = $0 })
+                ) { controls(name, $0) }
             }
         }
     }
 }
 
-/// What the profile window needs from a device's settings: the on switch and a fresh default.
+/// A device inside a profile: the on switch and its name, then the controls once it is on.
+private struct ProfileDeviceRow<S: DeviceSettingsLike, Controls: View>: View {
+    let name: String
+    let isConnected: Bool
+    @Binding var settings: S
+    @ViewBuilder let controls: (Binding<S>) -> Controls
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 6) {
+                Toggle(name, isOn: $settings.enabled)
+                    .toggleStyle(.switch)
+                    .controlSize(.mini)
+                    .tint(Theme.signal)
+                    .labelsHidden()
+                    .accessibilityLabel("\(name) in this profile")
+                Text(name)
+                    .font(.system(size: 12, weight: .medium))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .foregroundStyle(settings.enabled ? .primary : .secondary)
+                Spacer(minLength: 6)
+                if !isConnected {
+                    Text("Not connected")
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.tertiary)
+                }
+            }
+            if settings.enabled {
+                HStack(spacing: 8) { controls($settings) }
+            }
+        }
+        .padding(.horizontal, 9)
+        .padding(.vertical, settings.enabled ? Theme.cardPadding : 5)
+        .background(settings.enabled ? Theme.cardFill : .clear, in: .rect(cornerRadius: Theme.cardRadius))
+    }
+}
+
+/// What the profile panel needs from a device's settings: the on switch and a fresh default.
 protocol DeviceSettingsLike {
     static var fresh: Self { get }
     var enabled: Bool { get set }
@@ -214,6 +222,13 @@ protocol DeviceSettingsLike {
 
 extension OutputSettings: DeviceSettingsLike {}
 extension InputSettings: DeviceSettingsLike {}
+
+extension Binding where Value == Float {
+    /// The same value for a slider, which reads doubles.
+    var asDouble: Binding<Double> {
+        Binding<Double>(get: { Double(wrappedValue) }, set: { wrappedValue = Float($0) })
+    }
+}
 
 /// Shows a shortcut and records a new one: click, then press the keys. Escape cancels, Delete
 /// clears.

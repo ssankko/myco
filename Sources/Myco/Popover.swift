@@ -3,20 +3,43 @@ import MycoEngine
 import SwiftUI
 
 /// The menu bar window: master level on top, then everything the audio passes through on its way
-/// out and in.
+/// out and in. The equaliser and the profiles open as a panel on the left of that column.
 struct Popover: View {
     @Bindable var model: AppModel
     let actions: Actions
     let updater: Updater
+    let panels: Panels
 
     /// The master position while the thumb is held. The engine answers through the driver, which
     /// takes a moment, and a slider that springs back mid-drag is unusable.
     @State private var masterDraft: Float?
+    /// The height of the main column. A panel takes the same height, so the two share a bottom edge.
+    @State private var columnHeight: CGFloat = 0
+
+    /// Every part of the window has a fixed height, so the window can shrink as well as grow: a
+    /// view that stretched to fill would report the old height back and hold it.
+    private var panelHeight: CGFloat { max(Panel.minHeight, columnHeight) }
 
     private var outputs: [DeviceEntry] { model.devices.outputs.routable }
     private var inputs: [DeviceEntry] { model.devices.inputs.routable }
 
     var body: some View {
+        HStack(alignment: .top, spacing: 0) {
+            switch panels.open {
+            case .eq(let uid):
+                EQPanel(model: model, uid: uid, panels: panels, height: panelHeight)
+                Divider().frame(height: panelHeight)
+            case .profiles:
+                ProfilesPanel(model: model, panels: panels, height: panelHeight)
+                Divider().frame(height: panelHeight)
+            case nil:
+                EmptyView()
+            }
+            column.onGeometryChange(for: CGFloat.self) { $0.size.height } action: { columnHeight = $0 }
+        }
+    }
+
+    private var column: some View {
         VStack(alignment: .leading, spacing: Theme.sectionGap) {
             header
             master
@@ -41,10 +64,7 @@ struct Popover: View {
             footer
         }
         .padding(14)
-        // The window takes its final size at once while a row still animates its height, so the
-        // content is held to the top and grows down instead of out from the middle.
         .frame(width: Theme.popoverWidth)
-        .frame(maxHeight: .infinity, alignment: .top)
     }
 
     private var header: some View {
@@ -96,7 +116,7 @@ struct Popover: View {
         .opacity(model.masterMuted ? 0.65 : 1)
     }
 
-    /// One chip per profile; the active one is lit. The cog opens the window that edits them.
+    /// One chip per profile; the active one is lit. The cog opens the panel that edits them.
     private var profiles: some View {
         HStack(spacing: 6) {
             ForEach(model.settings.profiles) { profile in
@@ -110,11 +130,11 @@ struct Popover: View {
                 .help(profile.hotkey.map { "\(profile.name), \($0.display)" } ?? profile.name)
             }
             Spacer(minLength: 6)
-            Button { ProfilesWindow.show(model: model) } label: {
+            Button { panels.toggle(.profiles) } label: {
                 Image(systemName: "gearshape")
                     .imageScale(.small)
                     .frame(width: 14)
-                    .glyphChrome()
+                    .glyphChrome(isOn: panels.open == .profiles)
             }
             .buttonStyle(.borderless)
             .help("Edit profiles")
@@ -139,7 +159,7 @@ struct Popover: View {
             if outputs.isEmpty {
                 EmptyLane(text: "Nothing to play to. Connect headphones or speakers.")
             } else {
-                ForEach(outputs) { OutputRow(model: model, entry: $0) }
+                ForEach(outputs) { OutputRow(model: model, entry: $0, panels: panels) }
             }
         }
 

@@ -38,8 +38,8 @@ Readouts are fixed width, fixed sign and fixed decimals, so a column of numbers 
 
 ## Layout
 
-- The popover is 380 points wide, pinned to the top, and grows downward. Nothing animates when a row appears or changes size.
-- A window the popover opens, the equaliser or the profiles, appears to the left of the popover with its top edge level, so the two never cover each other. The popover stays open while that window is used; a click in another app, or Escape, closes it.
+- The menu bar window is one borderless window in the popover material, 380 points wide, hung under the status item. Its right edge stays put; it grows downward as rows open. Nothing animates when a row appears or changes size.
+- The equaliser and the profiles open as a panel on the left of that column, inside the same window, so the column never moves and nothing loses focus. A panel is 560 points wide, as tall as the column, and padded 14 like it; its top line is set like the column's header, a 13 point semibold title with a close glyph at the right, and one panel is open at a time. Escape closes the panel; with no panel open, Escape or a click in another app closes the window.
 - The profile chips sit right under the master, with no heading and no divider: the lit chip says which profile plays.
 - Rows are 10 points apart, sections 14. A card has a radius of 8 and a padding of 8.
 - A glyph button is 19 points high with a radius of 5, bordered in `border`, filled with `signal` and white on top while it is on. Under the pointer it takes `rowFillHover` and `borderHover`, or `signalHover` while on.

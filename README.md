@@ -31,7 +31,7 @@ To achieve all of this, Myco publishes two virtual devices through its own audio
 
 ## Features
 
-- **Many outputs at once.** Turn on any set of devices; each gets a volume, a delay, a buffer size and an EQ of its own. The EQ window carries the AutoEq correction for thousands of headphones, picked by name. The master slider moves each device's own volume, and a volume changed on the device, from an AirPods stem for example, moves the master.
+- **Many outputs at once.** Turn on any set of devices; each gets a volume, a delay, a buffer size and an EQ of its own. The EQ panel carries the AutoEq correction for thousands of headphones, picked by name. The master slider moves each device's own volume, and a volume changed on the device, from an AirPods stem for example, moves the master.
 - **Aligned outputs.** One switch delays every output to the slowest one, so speakers and headphones stay in time for pleasant media watching experience.
 - **One microphone from many.** Turn on the microphones you want, set each gain, and every app sees one input device so nothing has to reconnect or reload on the fly. The microphones open only while an app listens, so the orange indicator means what it does with a real microphone.
 - **Monitoring.** Hear a microphone in any output, with its own level.

@@ -7,6 +7,7 @@ import SwiftUI
 struct OutputRow: View {
     let model: AppModel
     let entry: DeviceEntry
+    let panels: Panels
 
     @State private var isHovered = false
 
@@ -56,14 +57,15 @@ struct OutputRow: View {
                     .foregroundStyle(Theme.signal)
                     .help("Every enabled output is disconnected, so the sound plays here.")
             }
-            if isHovered || isFallback {
-                GlyphToggle(
-                    label: "Play to \(entry.name) when no enabled output is connected",
-                    symbol: "lifepreserver",
-                    isOn: Binding(
-                        get: { isFallback },
-                        set: { model.settings.fallbackOutput = $0 ? entry.id : nil }))
-            }
+            // Laid out whether shown or not, so the row keeps its shape under the pointer.
+            GlyphToggle(
+                label: "Play to \(entry.name) when no enabled output is connected",
+                symbol: "lifepreserver",
+                isOn: Binding(
+                    get: { isFallback },
+                    set: { model.settings.fallbackOutput = $0 ? entry.id : nil }))
+                .opacity(isHovered || isFallback ? 1 : 0)
+                .accessibilityHidden(!(isHovered || isFallback))
             TransportTag(transport: entry.device.transportType)
         }
     }
@@ -83,7 +85,7 @@ struct OutputRow: View {
                     label: "Monitor microphones on \(entry.name)", symbol: "ear",
                     isOn: binding(\.monitor),
                     help: isMonitorSilent ? "Turn a microphone on below to hear it." : nil)
-                Button { EQWindows.show(model: model, uid: entry.id) } label: {
+                Button { panels.toggle(.eq(entry.id)) } label: {
                     Text("EQ")
                         .font(.system(size: 11, weight: .medium))
                         .glyphChrome(isOn: isEQActive)

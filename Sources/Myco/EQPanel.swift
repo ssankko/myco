@@ -4,9 +4,12 @@ import SwiftUI
 
 /// The ten band equaliser for one output. The curve is the control: the strip and the inspector
 /// under it read out and refine whichever band the user holds.
-struct EQWindow: View {
+struct EQPanel: View {
     let model: AppModel
     let uid: String
+    let panels: Panels
+    /// The panel's height, set by the column beside it; the curve takes what the rest leaves.
+    let height: CGFloat
 
     @State private var selected = 0
 
@@ -17,7 +20,7 @@ struct EQWindow: View {
     }
 
     private var name: String {
-        (try? AudioDevice.find(uid: uid))??.name.nilIfEmpty ?? uid
+        model.settings.outputNames[uid] ?? DeviceNames.guess(uid)
     }
 
     var body: some View {
@@ -25,7 +28,7 @@ struct EQWindow: View {
             header
 
             ResponseCurve(model: model, uid: uid, sampleRate: sampleRate, selected: $selected)
-                .frame(height: 210)
+                .frame(minHeight: 210, maxHeight: .infinity)
 
             BandStrip(model: model, uid: uid, selected: $selected)
 
@@ -35,22 +38,18 @@ struct EQWindow: View {
 
             footer
         }
-        .padding(18)
-        .frame(width: 560)
+        .padding(14)
+        .frame(width: 560, height: height, alignment: .top)
         .animation(.snappy(duration: 0.15), value: selected)
     }
 
     private var header: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
-            Text(name).font(.system(size: 15, weight: .semibold)).lineLimit(1)
-            Spacer(minLength: 8)
+        PanelHeader(title: name, panels: panels) {
             PresetButton(model: model, uid: uid)
             Text(String(format: "%.1f kHz", sampleRate / 1000))
                 .font(.system(size: 10.5).monospacedDigit())
                 .foregroundStyle(.tertiary)
         }
-        .accessibilityElement(children: .combine)
-        .accessibilityAddTraits(.isHeader)
     }
 
     private var footer: some View {
@@ -233,6 +232,25 @@ extension FilterType {
     }
 }
 
-extension String {
-    var nilIfEmpty: String? { isEmpty ? nil : self }
+/// The top line of a panel, set like the column's own header: the title, what belongs beside it,
+/// and the glyph that closes the panel.
+struct PanelHeader<Trailing: View>: View {
+    let title: String
+    let panels: Panels
+    @ViewBuilder let trailing: Trailing
+
+    var body: some View {
+        HStack(spacing: 7) {
+            Text(title).font(.system(size: 13, weight: .semibold)).lineLimit(1)
+            Spacer(minLength: 8)
+            trailing
+            Button { panels.open = nil } label: {
+                Image(systemName: "xmark").imageScale(.small).frame(width: 14).glyphChrome()
+            }
+            .buttonStyle(.borderless)
+            .help("Close")
+            .accessibilityLabel("Close panel")
+        }
+        .accessibilityAddTraits(.isHeader)
+    }
 }

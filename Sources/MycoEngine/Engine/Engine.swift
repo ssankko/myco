@@ -71,7 +71,7 @@ package final class Engine {
         var outputs: [String: UInt32?]
         var inputs: Set<String>
         /// The physical microphones open only while something listens: another process reading
-        /// `Myco Mic`, or a monitor on an enabled output. Idle, they stay closed and macOS shows no
+        /// `Myco Mic`, or a monitor on an output that is running. Idle, they stay closed and macOS shows no
         /// microphone indicator for Myco.
         var inputsWanted: Bool
         var fallback: String?
@@ -313,7 +313,10 @@ package final class Engine {
                     sampleRate: (try? device.nominalSampleRate) ?? 0,
                     bufferFrames: OutputNode.effectiveBufferFrames(device, output(uid).bufferFrames)))
         }
-        guard planInputs?.inputsWanted == true else { return wanted }
+        // Only an output that really runs can monitor, so an away output with monitoring on
+        // opens no microphone.
+        let monitoring = wanted.outputs.contains { output($0.uid).monitor }
+        guard micReaders > 0 || monitoring else { return wanted }
         for uid in Engine.ordered(settings.enabledInputs) where wanted.inputs.count < MonitorTap.maxInputs {
             guard uid != AppModel.micDeviceUID, uid != AppModel.outputDeviceUID,
                 let device = Engine.present(uid)

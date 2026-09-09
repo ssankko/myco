@@ -106,7 +106,8 @@ extension Hotkey {
             101: "F9", 109: "F10", 103: "F11", 111: "F12", 123: "←", 124: "→", 125: "↑", 126: "↓",
             49: "Space", 36: "↩", 48: "⇥", 51: "⌫", 117: "⌦", 115: "↖", 119: "↘", 116: "⇞", 121: "⇟",
         ]
-        let key = names[event.keyCode] ?? (event.charactersIgnoringModifiers ?? "").uppercased()
+        // The key without any modifier, so Shift-1 reads "1", not "!".
+        let key = names[event.keyCode] ?? (event.characters(byApplyingModifiers: []) ?? "").uppercased()
         guard !key.isEmpty else { return nil }
         self.init(keyCode: event.keyCode, modifiers: flags.rawValue, key: key)
     }

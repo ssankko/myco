@@ -44,6 +44,7 @@ struct EQWindow: View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
             Text(name).font(.system(size: 15, weight: .semibold)).lineLimit(1)
             Spacer(minLength: 8)
+            PresetButton(model: model, uid: uid)
             Text(String(format: "%.1f kHz", sampleRate / 1000))
                 .font(.system(size: 10.5).monospacedDigit())
                 .foregroundStyle(.tertiary)
@@ -59,7 +60,7 @@ struct EQWindow: View {
                 .foregroundStyle(.tertiary)
             Spacer(minLength: 8)
             Button("Reset all bands") {
-                model.updateOutput(uid) { $0.eq = OutputSettings.defaultEQ }
+                model.editEQ(uid) { $0 = OutputSettings.defaultEQ }
             }
             .controlSize(.small)
         }
@@ -184,7 +185,7 @@ private struct BandInspector: View {
     private func binding<T>(_ key: WritableKeyPath<BandSettings, T>) -> Binding<T> {
         Binding(
             get: { model.output(uid).eq[index][keyPath: key] },
-            set: { value in model.updateOutput(uid) { $0.eq[index][keyPath: key] = value } })
+            set: { value in model.editEQ(uid) { $0[index][keyPath: key] = value } })
     }
 
     private func clamped(
@@ -194,7 +195,7 @@ private struct BandInspector: View {
             get: { model.output(uid).eq[index][keyPath: key] },
             set: { value in
                 let kept = clamp(value, range.lowerBound, range.upperBound)
-                model.updateOutput(uid) { $0.eq[index][keyPath: key] = kept }
+                model.editEQ(uid) { $0[index][keyPath: key] = kept }
             })
     }
 }

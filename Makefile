@@ -1,7 +1,7 @@
 DIST := dist
 HAL := /Library/Audio/Plug-Ins/HAL
 
-.PHONY: build install uninstall run test test-capture
+.PHONY: build install uninstall run test test-capture autoeq
 
 build:
 	./scripts/bundle.sh
@@ -21,3 +21,7 @@ test:
 # Tests that capture audio need the microphone permission Terminal.app holds.
 test-capture:
 	./scripts/terminal-run.sh /tmp/myco-test.txt swift test
+
+# Refreshes Sources/Myco/Resources/autoeq.json from the AutoEq repository.
+autoeq:
+	./scripts/autoeq.py

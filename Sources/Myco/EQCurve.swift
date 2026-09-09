@@ -82,7 +82,7 @@ struct ResponseCurve: View {
                 x: size.width * LogScale.position(of: band.frequency),
                 y: CurveAxis.y(band.type.usesGain ? band.gainDB : 0, in: size.height))
             .onTapGesture(count: 2) {
-                model.updateOutput(uid) { $0.eq[index].bypass.toggle() }
+                model.editEQ(uid) { $0[index].bypass.toggle() }
             }
             .onTapGesture { selected = index }
             .gesture(
@@ -104,8 +104,8 @@ struct ResponseCurve: View {
             .accessibilityAdjustableAction { direction in
                 selected = index
                 let step = pow(2.0, direction == .increment ? 1.0 / 3 : -1.0 / 3)
-                model.updateOutput(uid) {
-                    $0.eq[index].frequency = clamp(band.frequency * step, 20, 20000)
+                model.editEQ(uid) {
+                    $0[index].frequency = clamp(band.frequency * step, 20, 20000)
                 }
             }
     }
@@ -127,7 +127,7 @@ struct ResponseCurve: View {
                 band.gainDB = (clamp(decibels, -CurveAxis.span, CurveAxis.span) * 10).rounded() / 10
             }
         }
-        model.updateOutput(uid) { $0.eq[index] = band }
+        model.editEQ(uid) { $0[index] = band }
     }
 
     private static func spoken(_ band: BandSettings) -> String {

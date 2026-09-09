@@ -49,7 +49,7 @@ codesign --force --sign - "$DRIVER"
 
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BUILD/Myco" "$APP/Contents/MacOS/Myco"
-cp "$ROOT/Sources/Myco/Myco.svg" "$APP/Contents/Resources/"
+cp "$ROOT/Sources/Myco/Myco.svg" "$ROOT/Sources/Myco/Resources/"* "$APP/Contents/Resources/"
 cp "$DRIVER/Contents/Resources/Myco.icns" "$APP/Contents/Resources/"
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

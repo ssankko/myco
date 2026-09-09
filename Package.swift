@@ -22,7 +22,7 @@ let package = Package(
         .target(name: "MycoDSP", dependencies: ["MycoAtomics"]),
         .target(name: "MycoEngine", dependencies: ["MycoDSP", "MycoAtomics"]),
         .executableTarget(
-            name: "Myco", dependencies: ["MycoEngine", "MycoDSP"], exclude: ["Myco.svg"]),
+            name: "Myco", dependencies: ["MycoEngine", "MycoDSP"], exclude: ["Myco.svg", "Resources"]),
         // Signal measurements both test targets assert on.
         .target(name: "MycoTestSupport", path: "Tests/MycoTestSupport"),
         .testTarget(name: "MycoDSPTests", dependencies: ["MycoDSP", "MycoTestSupport"]),

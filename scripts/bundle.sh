@@ -76,6 +76,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 	<string>14.0</string>
 	<key>LSUIElement</key>
 	<true/>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>Myco reads the names of your paired Bluetooth headphones, so a profile can list them while they are not connected.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Myco reads your microphones so it can mix them into one input device.</string>
 </dict>

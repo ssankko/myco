@@ -50,9 +50,25 @@ struct OutputRow: View {
             .onTapGesture { model.updateOutput(entry.id) { $0.enabled.toggle() } }
             .accessibilityHidden(true)
             Spacer(minLength: 6)
+            if !settings.enabled, status.isActive {
+                Text("playing")
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(Theme.signal)
+                    .help("Every enabled output is disconnected, so the sound plays here.")
+            }
+            if isHovered || isFallback {
+                GlyphToggle(
+                    label: "Play to \(entry.name) when no enabled output is connected",
+                    symbol: "lifepreserver",
+                    isOn: Binding(
+                        get: { isFallback },
+                        set: { model.settings.fallbackOutput = $0 ? entry.id : nil }))
+            }
             TransportTag(transport: entry.device.transportType)
         }
     }
+
+    private var isFallback: Bool { model.settings.fallbackOutput == entry.id }
 
     @ViewBuilder
     private var chain: some View {

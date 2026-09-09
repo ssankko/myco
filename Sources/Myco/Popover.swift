@@ -30,7 +30,7 @@ struct Popover: View {
                 ) { updater.install() }
                 .accessibilityLabel("Update")
             }
-            Divider().opacity(0.6)
+            profiles
             // A short list lets the popover grow to fit; a long one scrolls at a fixed height.
             if outputs.count + inputs.count <= 8 {
                 deviceStack
@@ -94,6 +94,32 @@ struct Popover: View {
                 .accessibilityHidden(true)
         }
         .opacity(model.masterMuted ? 0.65 : 1)
+    }
+
+    /// One chip per profile; the active one is lit. The cog opens the window that edits them.
+    private var profiles: some View {
+        HStack(spacing: 6) {
+            ForEach(model.settings.profiles) { profile in
+                Button { model.settings.activeProfileID = profile.id } label: {
+                    Text(profile.name)
+                        .font(.system(size: 11, weight: .medium))
+                        .lineLimit(1)
+                        .glyphChrome(isOn: profile.id == model.settings.activeProfileID)
+                }
+                .buttonStyle(.borderless)
+                .help(profile.hotkey.map { "\(profile.name), \($0.display)" } ?? profile.name)
+            }
+            Spacer(minLength: 6)
+            Button { ProfilesWindow.show(model: model) } label: {
+                Image(systemName: "gearshape")
+                    .imageScale(.small)
+                    .frame(width: 14)
+                    .glyphChrome()
+            }
+            .buttonStyle(.borderless)
+            .help("Edit profiles")
+            .accessibilityLabel("Edit profiles")
+        }
     }
 
     private var deviceStack: some View {

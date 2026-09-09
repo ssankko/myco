@@ -55,6 +55,30 @@ package final class AppModel {
 
     package init(settings: Settings = .load()) {
         self.settings = settings
+        rememberDeviceNames()
+        Task { [weak self] in
+            guard let events = self?.devices.events() else { return }
+            for await event in events {
+                if case .arrived = event { self?.rememberDeviceNames() }
+            }
+        }
+    }
+
+    /// Records the name of every connected device, so the profile window can list it later
+    /// while it is away.
+    package func rememberDeviceNames() {
+        func note(_ devices: [AudioDevice], into names: inout [String: String]) {
+            for device in devices {
+                guard let uid = try? device.uid, uid != AppModel.outputDeviceUID, uid != AppModel.micDeviceUID,
+                      !device.name.isEmpty, names[uid] != device.name
+                else { continue }
+                names[uid] = device.name
+            }
+        }
+        var next = settings
+        note(devices.outputs, into: &next.outputNames)
+        note(devices.inputs, into: &next.inputNames)
+        if next != settings { settings = next }
     }
 
     /// Writes the driver's volume control. The engine's listener then updates `master`.

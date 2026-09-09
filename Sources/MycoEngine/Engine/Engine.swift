@@ -74,11 +74,13 @@ package final class Engine {
         /// `Myco Mic`, or a monitor on an enabled output. Idle, they stay closed and macOS shows no
         /// microphone indicator for Myco.
         var inputsWanted: Bool
+        var fallback: String?
 
         init(_ settings: Settings, micReaders: Int) {
             virtualRate = settings.virtualRate
             outputs = settings.outputs.filter(\.value.enabled).mapValues(\.bufferFrames)
-            inputs = Set(settings.inputs.filter(\.value.enabled).keys)
+            inputs = settings.enabledInputs
+            fallback = settings.fallbackOutput
             inputsWanted = micReaders > 0 || settings.outputs.values.contains { $0.enabled && $0.monitor }
         }
     }
@@ -297,7 +299,12 @@ package final class Engine {
         guard virtualDevice != nil, let feed = openFeed() else { return Plan() }
         var wanted = Plan(virtualRate: feed.sampleRate)
 
-        let outputUIDs = Set(settings.outputs.filter(\.value.enabled).keys)
+        var outputUIDs = settings.enabledOutputs
+        // With every enabled output unplugged, the stream goes to the fallback instead of nowhere.
+        if let fallback = settings.fallbackOutput,
+            !outputUIDs.contains(where: { Engine.present($0) != nil }) {
+            outputUIDs = [fallback]
+        }
         for uid in Engine.ordered(outputUIDs) {
             guard uid != AppModel.outputDeviceUID, let device = Engine.present(uid) else { continue }
             wanted.outputs.append(
@@ -307,8 +314,7 @@ package final class Engine {
                     bufferFrames: OutputNode.effectiveBufferFrames(device, output(uid).bufferFrames)))
         }
         guard planInputs?.inputsWanted == true else { return wanted }
-        let inputUIDs = Set(settings.inputs.filter(\.value.enabled).keys)
-        for uid in Engine.ordered(inputUIDs) where wanted.inputs.count < MonitorTap.maxInputs {
+        for uid in Engine.ordered(settings.enabledInputs) where wanted.inputs.count < MonitorTap.maxInputs {
             guard uid != AppModel.micDeviceUID, uid != AppModel.outputDeviceUID,
                 let device = Engine.present(uid)
             else { continue }

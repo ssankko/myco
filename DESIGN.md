@@ -39,6 +39,8 @@ Readouts are fixed width, fixed sign and fixed decimals, so a column of numbers 
 ## Layout
 
 - The popover is 380 points wide, pinned to the top, and grows downward. Nothing animates when a row appears or changes size.
+- A window the popover opens, the equaliser or the profiles, appears to the left of the popover with its top edge level, so the two never cover each other. The popover stays open while that window is used; a click in another app, or Escape, closes it.
+- The profile chips sit right under the master, with no heading and no divider: the lit chip says which profile plays.
 - Rows are 10 points apart, sections 14. A card has a radius of 8 and a padding of 8.
 - A glyph button is 19 points high with a radius of 5, bordered in `border`, filled with `signal` and white on top while it is on. Under the pointer it takes `rowFillHover` and `borderHover`, or `signalHover` while on.
 - The details of an output sit on one row: buffer picker, then sync trim and computed delay when outputs are aligned, then the latency and underrun readouts pushed right. They wrap under the controls only when they do not fit.
@@ -47,6 +49,7 @@ Readouts are fixed width, fixed sign and fixed decimals, so a column of numbers 
 
 - No explanatory text inside a row. A row is a name, its controls and its readouts. Anything that needs a sentence goes into a tooltip.
 - A lit control means an active state, not an available one. EQ lights up only when its curve is not flat; the ear lights up only while a microphone is monitored.
+- Controls that are set once and rarely, such as the fallback ring on an output, appear only under the pointer or while on.
 - Clicking a device's name toggles it. Double-clicking a slider's readout resets it. Both are tooltips, not labels.
 - The spinner in the header shows only while nodes really stop and start. A slider drag never shows it.
 - Quit and Remove driver live in the status item's right-click menu, not in the popover.

@@ -18,6 +18,7 @@ struct MycoApp: App {
         let actions = Actions()
         let engine = Engine(model: model)
         LaunchAtLogin.observe(model)
+        Hotkeys.shared.watch(model)
         let updater = Updater()
         updater.start()
         actions.install = { try? await engine.installDriver() }
@@ -47,6 +48,7 @@ enum EQWindows {
     static func show(model: AppModel, uid: String) {
         let window = windows[uid] ?? make(model: model, uid: uid)
         windows[uid] = window
+        window.placeBesidePopover()
         window.makeKeyAndOrderFront(nil)
         NSApplication.shared.activate()
     }
@@ -61,7 +63,6 @@ enum EQWindows {
         // Ordering the window front brings it to the current space rather than switching to
         // the one it was last on, and a full-screen app does not hide it.
         window.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
-        window.center()
         return window
     }
 }
@@ -100,7 +101,7 @@ final class StatusItem: NSObject {
     private let actions: Actions
     /// Watches for clicks in other apps while the popover is open.
     private var outsideClicks: Any?
-    /// Watches for clicks in this app's other windows, and for Escape, while the popover is open.
+    /// Watches for Escape and Cmd-Q while the popover is open.
     private var localEvents: Any?
     private var becameActive: (any NSObjectProtocol)?
 
@@ -155,28 +156,21 @@ final class StatusItem: NSObject {
         ) { [weak self] _ in
             MainActor.assumeIsolated { self?.popover.contentViewController?.view.window?.makeKey() }
         }
-        // The global monitor sees the clicks that land in other apps; the local one sees this
-        // app's own, and lets the ones inside the popover through.
+        // A click in another app closes the popover; a click in one of Myco's own windows, the
+        // equaliser or the profiles, keeps it open. Escape closes it from anywhere in the app.
         let clicks: NSEvent.EventTypeMask = [.leftMouseDown, .rightMouseDown, .otherMouseDown]
         outsideClicks = NSEvent.addGlobalMonitorForEvents(matching: clicks) { [weak self] _ in
             MainActor.assumeIsolated { self?.popover.performClose(nil) }
         }
-        localEvents = NSEvent.addLocalMonitorForEvents(matching: clicks.union(.keyDown)) { [weak self] event in
-            let escape = event.type == .keyDown && event.keyCode == 53
-            let quit = event.type == .keyDown && event.modifierFlags.contains(.command)
-                && event.charactersIgnoringModifiers == "q"
+        localEvents = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            let quit = event.modifierFlags.contains(.command) && event.charactersIgnoringModifiers == "q"
             if quit {
                 MainActor.assumeIsolated { NSApplication.shared.terminate(nil) }
                 return nil
             }
-            let closes = MainActor.assumeIsolated { () -> Bool in
-                guard let self else { return false }
-                let inside = event.window == self.popover.contentViewController?.view.window
-                return escape || (event.type != .keyDown && !inside)
-            }
-            guard closes else { return event }
+            guard event.keyCode == 53 else { return event }
             MainActor.assumeIsolated { self?.popover.performClose(nil) }
-            return escape ? nil : event
+            return nil
         }
     }
 

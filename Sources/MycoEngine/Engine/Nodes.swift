@@ -429,7 +429,9 @@ package final class OutputNode {
             ringFill: render.ringFill,
             sampleRate: sampleRate)
 
-        proc = try IOProc(device: device) { _, _, _, output, _ in
+        // Input usage off: a device with a microphone of its own, AirPods say, must not have it
+        // opened by an output, which would light the indicator and drop Bluetooth to the headset codec.
+        proc = try IOProc(device: device, usesInput: false) { _, _, _, output, _ in
             guard let output else { return }
             render.render(into: output)
         }

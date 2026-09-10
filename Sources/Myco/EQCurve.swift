@@ -41,7 +41,7 @@ struct ResponseCurve: View {
     /// The band as it stood when the drag began, so the pointer keeps its grip on the handle.
     @State private var anchor: (index: Int, band: BandSettings)?
 
-    private var bands: [BandSettings] { model.output(uid).eq }
+    private var bands: [BandSettings] { model.eqBands(uid) }
 
     var body: some View {
         GeometryReader { geometry in

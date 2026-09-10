@@ -13,7 +13,10 @@ final class DSPEQPresetTests: XCTestCase {
         let presets = try EQPreset.autoEq(from: data)
         print("autoeq.json: \(presets.count) presets, \(data.count) bytes, decoded in \(Int(-start.timeIntervalSinceNow * 1000)) ms")
 
-        XCTAssertGreaterThan(presets.count, 8000)
+        // The six rigs that publish nowhere else; squig.link measurers are read live instead.
+        XCTAssertGreaterThan(presets.count, 4500)
+        XCTAssertFalse(presets.contains { $0.source == "Super Review" })
+        XCTAssertTrue(presets.contains { $0.source == "oratory1990" })
         XCTAssertTrue(presets.allSatisfy { $0.bands.count == Equalizer.bandCount })
         XCTAssertTrue(presets.allSatisfy { ["over-ear", "in-ear", "earbud"].contains($0.form) })
         let shelves = presets.first!.bands.map(\.type)

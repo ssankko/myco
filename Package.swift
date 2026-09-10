@@ -28,5 +28,6 @@ let package = Package(
         .testTarget(name: "MycoDSPTests", dependencies: ["MycoDSP", "MycoTestSupport"]),
         .testTarget(
             name: "MycoEngineTests", dependencies: ["MycoEngine", "MycoTestSupport"]),
+        .testTarget(name: "MycoTests", dependencies: ["Myco"]),
     ]
 )

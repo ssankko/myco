@@ -31,7 +31,7 @@ To achieve all of this, Myco publishes two virtual devices through its own audio
 
 ## Features
 
-- **Many outputs at once.** Turn on any set of devices; each gets a volume, a delay, a buffer size and an EQ of its own. The EQ panel carries the AutoEq correction for thousands of headphones, picked by name. The master slider moves each device's own volume, and a volume changed on the device, from an AirPods stem for example, moves the master.
+- **Many outputs at once.** Turn on any set of devices; each gets a volume, a delay, a buffer size and an EQ of its own. The EQ panel carries the AutoEq correction for thousands of headphones, picked by name, and fits one on the spot from any measurement on squig.link. A headphone measured at several volumes, AirPods for one, gets a correction that follows the volume slider. The master slider moves each device's own volume, and a volume changed on the device, from an AirPods stem for example, moves the master.
 - **Aligned outputs.** One switch delays every output to the slowest one, so speakers and headphones stay in time for pleasant media watching experience.
 - **One microphone from many.** Turn on the microphones you want, set each gain, and every app sees one input device so nothing has to reconnect or reload on the fly. The microphones open only while an app listens, so the orange indicator means what it does with a real microphone.
 - **Monitoring.** Hear a microphone in any output, with its own level.
@@ -60,7 +60,7 @@ Requires Xcode 16 or later. There is no Xcode project.
 ```
 make build          # dist/Myco.app with the driver inside
 make install        # copies the driver into place (administrator prompt)
-swift test --filter MycoDSPTests   # the sample maths, no hardware needed
+swift test --filter "MycoDSPTests|MycoTests"   # the sample maths and the app rules, no hardware needed
 make test-capture   # everything; needs the driver installed and a microphone
 ```
 
@@ -68,7 +68,7 @@ make test-capture   # everything; needs the driver installed and a microphone
 
 ## Credits
 
-Headphone presets come from [AutoEq](https://github.com/jaakkopasanen/AutoEq) by Jaakko Pasanen (MIT), refreshed with `make autoeq`.
+Headphone presets come from [AutoEq](https://github.com/jaakkopasanen/AutoEq) by Jaakko Pasanen (MIT), refreshed with `make autoeq`, for the rigs that publish nowhere else, and from the measurers who publish on [squig.link](https://squig.link), read live when the picker opens.
 
 ## License
 

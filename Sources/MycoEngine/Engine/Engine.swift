@@ -473,9 +473,10 @@ package final class Engine {
             } else {
                 node.masterTarget.value = softwareMaster
             }
-            if settings.eq.count == Equalizer.bandCount, pushedEQ[node.uid] != settings.eq {
-                node.eq.setBands(settings.eq)
-                pushedEQ[node.uid] = settings.eq
+            let bands = settings.eq(atVolume: Double(master))
+            if bands.count == Equalizer.bandCount, pushedEQ[node.uid] != bands {
+                node.eq.setBands(bands)
+                pushedEQ[node.uid] = bands
             }
         }
         for node in inputs {

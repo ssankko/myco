@@ -1,4 +1,5 @@
 import Foundation
+import MycoDSP
 import XCTest
 
 @testable import MycoEngine
@@ -29,6 +30,10 @@ final class SettingsTests: XCTestCase {
         var settings = Settings()
         settings.outputs["a"] = OutputSettings()
         settings.outputs["a"]?.enabled = true
+        settings.outputs["a"]?.eqVolumes = [
+            EQVolumeStep(volume: 0.5, gainsDB: Array(repeating: 1, count: 10)),
+            EQVolumeStep(volume: 0.75, gainsDB: Array(repeating: 3, count: 10)),
+        ]
         let game = settings.addProfile()
         settings.profiles[1].hotkey = Hotkey(keyCode: 5, modifiers: 0x1E0000, key: "G")
         settings.activeProfileID = game.id
@@ -37,6 +42,8 @@ final class SettingsTests: XCTestCase {
         XCTAssertEqual(back, settings)
         XCTAssertEqual(back.active.name, "Profile 2")
         XCTAssertEqual(back.active.hotkey?.key, "G")
+        // Between two steps the played gains sit in proportion to the volume.
+        XCTAssertEqual(back.outputs["a"]?.eq(atVolume: 0.625).map(\.gainDB), Array(repeating: 2, count: 10))
     }
 
     func testTheActiveProfileHoldsTheDeviceSettings() {

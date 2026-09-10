@@ -5,7 +5,7 @@ A macOS menu bar app (Swift 6 package, no Xcode project) that plays one audio st
 ## Working here
 
 - `make build` assembles `dist/Myco.app`; `make install` needs an administrator prompt, so never run it from an agent.
-- `swift test --filter MycoDSPTests` needs no hardware. `make test-capture` runs everything in a Terminal.app window and needs the driver installed and a microphone; quit Myco first (`pkill -x Myco`).
+- `swift test --filter "MycoDSPTests|MycoTests"` needs no hardware. `make test-capture` runs everything in a Terminal.app window and needs the driver installed and a microphone; quit Myco first (`pkill -x Myco`).
 - Tests must not depend on which devices are connected or enabled.
 
 ## Agent skills

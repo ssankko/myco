@@ -1,6 +1,20 @@
 import Foundation
 
-/// A headphone correction for the ten bands, measured by an AutoEq contributor.
+/// The gains of the ten bands at one device volume, for a headphone whose tuning follows its
+/// volume. The bands keep their shapes; only the gains move between steps.
+public struct EQVolumeStep: Sendable, Equatable, Codable {
+    /// The device volume as a control scalar, 0 to 1.
+    public var volume: Double
+    public var gainsDB: [Double]
+
+    public init(volume: Double, gainsDB: [Double]) {
+        self.volume = volume
+        self.gainsDB = gainsDB
+    }
+}
+
+/// A headphone correction for the ten bands, measured by an AutoEq contributor or fitted from a
+/// squig.link measurement.
 public struct EQPreset: Sendable, Equatable, Identifiable {
     public var id: String { "\(source)/\(form)/\(name)" }
     public var name: String
@@ -12,16 +26,46 @@ public struct EQPreset: Sendable, Equatable, Identifiable {
     public var preampDB: Double
     /// Always `Equalizer.bandCount` bands.
     public var bands: [BandSettings]
+    /// Gains per device volume, sorted by volume; empty for a preset that does not follow it.
+    public var volumes: [EQVolumeStep]
 
     /// The name as the EQ window shows it: the measurer follows the headphone name.
     public var title: String { "\(name) (\(source))" }
 
-    public init(name: String, source: String, form: String, preampDB: Double, bands: [BandSettings]) {
+    public init(
+        name: String, source: String, form: String, preampDB: Double, bands: [BandSettings],
+        volumes: [EQVolumeStep] = []
+    ) {
         self.name = name
         self.source = source
         self.form = form
         self.preampDB = preampDB
         self.bands = Self.padded(bands)
+        self.volumes = volumes.sorted { $0.volume < $1.volume }
+    }
+
+    /// `bands` with the gains that belong at `volume`: linear in dB between the two nearest
+    /// steps, held at the end steps outside them. No steps means `bands` as they are.
+    public static func bands(_ bands: [BandSettings], volumes: [EQVolumeStep], at volume: Double) -> [BandSettings] {
+        guard let first = volumes.first, let last = volumes.last,
+              volumes.allSatisfy({ $0.gainsDB.count == bands.count })
+        else { return bands }
+        let gains: [Double]
+        if volume <= first.volume {
+            gains = first.gainsDB
+        } else if volume >= last.volume {
+            gains = last.gainsDB
+        } else {
+            let above = volumes.firstIndex { $0.volume > volume }!
+            let (low, high) = (volumes[above - 1], volumes[above])
+            let t = (volume - low.volume) / (high.volume - low.volume)
+            gains = zip(low.gainsDB, high.gainsDB).map { $0 + ($1 - $0) * t }
+        }
+        return zip(bands, gains).map { band, gain in
+            var band = band
+            band.gainDB = gain
+            return band
+        }
     }
 
     /// Exactly `Equalizer.bandCount` bands: the first ten, or the given ones followed by bypassed

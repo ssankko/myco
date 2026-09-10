@@ -1,5 +1,6 @@
 import CoreAudio
 import Foundation
+import MycoDSP
 import Observation
 
 /// Live facts about one output that the engine measures and the UI shows.
@@ -98,6 +99,11 @@ package final class AppModel {
 
     package func input(_ uid: String) -> InputSettings {
         settings.inputs[uid] ?? InputSettings()
+    }
+
+    /// The bands the engine plays on `uid` at the current master, what the EQ window shows.
+    package func eqBands(_ uid: String) -> [BandSettings] {
+        output(uid).eq(atVolume: Double(master))
     }
 
     package func updateOutput(_ uid: String, _ change: (inout OutputSettings) -> Void) {

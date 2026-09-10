@@ -72,7 +72,7 @@ private struct BandStrip: View {
     let uid: String
     @Binding var selected: Int
 
-    private var bands: [BandSettings] { model.output(uid).eq }
+    private var bands: [BandSettings] { model.eqBands(uid) }
 
     var body: some View {
         HStack(spacing: 5) {
@@ -121,7 +121,7 @@ private struct BandInspector: View {
     let uid: String
     let index: Int
 
-    private var band: BandSettings { model.output(uid).eq[index] }
+    private var band: BandSettings { model.eqBands(uid)[index] }
 
     var body: some View {
         HStack(spacing: 9) {
@@ -183,7 +183,7 @@ private struct BandInspector: View {
 
     private func binding<T>(_ key: WritableKeyPath<BandSettings, T>) -> Binding<T> {
         Binding(
-            get: { model.output(uid).eq[index][keyPath: key] },
+            get: { model.eqBands(uid)[index][keyPath: key] },
             set: { value in model.editEQ(uid) { $0[index][keyPath: key] = value } })
     }
 
@@ -191,7 +191,7 @@ private struct BandInspector: View {
         _ key: WritableKeyPath<BandSettings, Double>, to range: ClosedRange<Double>
     ) -> Binding<Double> {
         Binding(
-            get: { model.output(uid).eq[index][keyPath: key] },
+            get: { model.eqBands(uid)[index][keyPath: key] },
             set: { value in
                 let kept = clamp(value, range.lowerBound, range.upperBound)
                 model.editEQ(uid) { $0[index][keyPath: key] = kept }

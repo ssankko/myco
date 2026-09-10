@@ -14,6 +14,13 @@ package struct OutputSettings: Codable, Equatable, Sendable {
     package var eq: [BandSettings] = OutputSettings.defaultEQ
     /// The title of the preset `eq` and `gainDB` were set from; nil once a band is edited by hand.
     package var presetName: String?
+    /// The gains of `eq` per device volume, for a preset that follows it; nil for a fixed one.
+    package var eqVolumes: [EQVolumeStep]?
+
+    /// The bands that play at `volume`: `eq` with its gains moved between the two nearest steps.
+    package func eq(atVolume volume: Double) -> [BandSettings] {
+        EQPreset.bands(eq, volumes: eqVolumes ?? [], at: volume)
+    }
 
     /// Ten parametric bands at ISO octave centres, all flat.
     package static let defaultEQ: [BandSettings] = [31.5, 63, 125, 250, 500, 1000, 2000, 4000, 8000, 16000].map {

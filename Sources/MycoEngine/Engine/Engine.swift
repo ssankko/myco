@@ -42,8 +42,12 @@ package final class Engine {
             var uid: String
             var deviceID: AudioDeviceID
             var sampleRate: Double
+            /// What the device will run at, already clamped to its range.
+            var bufferFrames: UInt32
             /// One IO cycle of this input, in mic mix frames.
             var blockFrames: Int
+            /// The device's channels that go into the mix.
+            var channels: [Int]
         }
 
         /// The rate the shared ring runs at, which the engine sets from `settings.virtualRate`.
@@ -69,7 +73,8 @@ package final class Engine {
         var virtualRate: Double
         /// Every enabled output and the buffer size it asks for.
         var outputs: [String: UInt32?]
-        var inputs: Set<String>
+        /// Every enabled input and the channels it puts into the mix.
+        var inputs: [String: [Int]?]
         /// The physical microphones open only while something listens: another process reading
         /// `Myco Mic`, or a monitor on an output that is running. Idle, they stay closed and macOS shows no
         /// microphone indicator for Myco.
@@ -79,7 +84,7 @@ package final class Engine {
         init(_ settings: Settings, micReaders: Int) {
             virtualRate = settings.virtualRate
             outputs = settings.outputs.filter(\.value.enabled).mapValues(\.bufferFrames)
-            inputs = settings.enabledInputs
+            inputs = settings.inputs.filter(\.value.enabled).mapValues(\.channels)
             fallback = settings.fallbackOutput
             inputsWanted = micReaders > 0 || settings.outputs.values.contains { $0.enabled && $0.monitor }
         }
@@ -322,12 +327,15 @@ package final class Engine {
                 let device = Engine.present(uid)
             else { continue }
             let rate = (try? device.nominalSampleRate) ?? 0
-            let block = Int((try? device.bufferFrameSize) ?? 512)
+            // A device that is also an output keeps the size set for it there.
+            let buffer = OutputNode.effectiveBufferFrames(device, output(uid).bufferFrames)
+            let block = Int(buffer)
             wanted.inputs.append(
                 Plan.Input(
-                    uid: uid, deviceID: device.id, sampleRate: rate,
+                    uid: uid, deviceID: device.id, sampleRate: rate, bufferFrames: buffer,
                     blockFrames: rate > 0
-                        ? Int((Double(block) * micMixRate / rate).rounded(.up)) : block))
+                        ? Int((Double(block) * micMixRate / rate).rounded(.up)) : block,
+                    channels: input(uid).channels(available: device.inputChannelCount)))
         }
         return wanted
     }
@@ -424,7 +432,8 @@ package final class Engine {
                 inputs.append(
                     try InputNode(
                         uid: item.uid, device: AudioDevice(id: item.deviceID),
-                        settings: input(item.uid), destinations: rings))
+                        settings: input(item.uid), bufferFrames: item.bufferFrames,
+                        channels: item.channels, destinations: rings))
             } catch {
                 log.error("input \(item.uid, privacy: .public): \(String(describing: error), privacy: .public)")
             }

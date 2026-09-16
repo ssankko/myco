@@ -99,7 +99,18 @@ package struct AudioDevice: Identifiable, Hashable, Sendable {
     var hasOutput: Bool { outputChannelCount > 0 }
     var hasInput: Bool { inputChannelCount > 0 }
     var outputChannelCount: Int { channelCount(scope: .output) }
-    var inputChannelCount: Int { channelCount(scope: .input) }
+    package var inputChannelCount: Int { channelCount(scope: .input) }
+
+    /// The name the device gives each input channel, in channel order; empty for a channel it
+    /// leaves unnamed.
+    package var inputChannelNames: [String] {
+        (0..<inputChannelCount).map { channel in
+            (try? id.string(
+                AudioObjectPropertyAddress(
+                    kAudioObjectPropertyElementName, kAudioObjectPropertyScopeInput,
+                    AudioObjectPropertyElement(channel + 1)))) ?? ""
+        }
+    }
 
     func channelCount(scope: Scope) -> Int {
         let address = AudioObjectPropertyAddress(

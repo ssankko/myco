@@ -33,6 +33,17 @@ package struct InputSettings: Codable, Equatable, Sendable {
     package var enabled = false
     package var gainDB: Float = 0
     package var muted = false
+    /// The device's channels that go into the mix, counted from 0; nil means the default for the
+    /// device's channel count.
+    package var channels: [Int]?
+
+    /// The channels that go into the mix on a device with `count` input channels: the chosen ones
+    /// that exist, or, with none, all of one or two channels and the first two above that, because
+    /// an audio interface lists its loopback and mix channels after the physical inputs.
+    package func channels(available count: Int) -> [Int] {
+        let chosen = (channels ?? []).filter { $0 < count }
+        return chosen.isEmpty ? Array(0..<min(count, 2)) : chosen
+    }
 }
 
 /// The settings of a device the user has not touched yet.

@@ -209,6 +209,10 @@ struct OutputRender: @unchecked Sendable {
         var gain: SmoothedGain
         var monitorGain: SmoothedGain
         var master: SmoothedGain
+        /// The largest block any writer published since the last resync. A system sound plays
+        /// into the ring next to the game with a block of its own, and the reader must sit behind
+        /// the larger of the two, while the header only carries the last one.
+        var largestWriteBlock: Int
     }
 
     let tap: MonitorTap
@@ -283,7 +287,8 @@ struct OutputRender: @unchecked Sendable {
                 gain: SmoothedGain(sampleRate: sampleRate, decibels: gainDB),
                 monitorGain: SmoothedGain(sampleRate: sampleRate, decibels: silenceDecibels),
                 // Silent at first, so a proc that starts mid-waveform ramps in instead of clicking.
-                master: SmoothedGain(sampleRate: sampleRate, decibels: silenceDecibels)))
+                master: SmoothedGain(sampleRate: sampleRate, decibels: silenceDecibels),
+                largestWriteBlock: 0))
     }
 
     func deallocate() {
@@ -328,7 +333,8 @@ struct OutputRender: @unchecked Sendable {
         // The write position is read first: the block that published it is already there, while
         // the other order can pair a fresh position with the block before it.
         let write = feed.writeFrame
-        let writeBlock = feed.writeBlockFrames
+        let writeBlock = max(state.pointee.largestWriteBlock, feed.writeBlockFrames)
+        state.pointee.largestWriteBlock = writeBlock
         let target = FeedReader.targetFill(writeBlock: writeBlock, pull: pull)
         guard
             let step = state.pointee.reader.step(
@@ -339,6 +345,9 @@ struct OutputRender: @unchecked Sendable {
         }
         if step.resynced {
             state.pointee.follower.aim(target: Double(step.fill), producerBlock: Double(writeBlock))
+            // ponytail: a block seen once holds the target until the next resync; decay it if a
+            // rare large writer costs too much latency.
+            state.pointee.largestWriteBlock = feed.writeBlockFrames
         }
 
         state.pointee.resampler.ratio =
@@ -446,9 +455,9 @@ package final class OutputNode {
         isBluetooth(transport) ? 256 : 128
     }
 
-    /// The size the device runs at once this node has it: the setting or the transport default,
-    /// clamped to what the device accepts. The plan carries it, so it is answered before the node
-    /// exists.
+    /// The size a device runs at once a node has it: the setting or the transport default, clamped
+    /// to what the device accepts. Inputs use it too, so the monitor waits for a block no larger
+    /// than the output's. The plan carries it, so it is answered before the node exists.
     static func effectiveBufferFrames(_ device: AudioDevice, _ wanted: UInt32?) -> UInt32 {
         let frames = wanted ?? defaultBufferFrames(device.transportType)
         guard let range = try? device.bufferFrameSizeRange else { return frames }
@@ -463,8 +472,8 @@ package final class OutputNode {
     }
 }
 
-/// One enabled physical input: mono-summed, gained, resampled to the mic mix rate and written into
-/// one ring per consumer.
+/// One enabled physical input: its chosen channels summed to mono, gained, resampled to the mic
+/// mix rate and written into one ring per consumer.
 @EngineActor
 final class InputNode {
     struct State {
@@ -482,12 +491,18 @@ final class InputNode {
     private let state: UnsafeMutablePointer<State>
     private var proc: IOProc?
 
-    init(uid: String, device: AudioDevice, settings: InputSettings, destinations rings: [RingBuffer]) throws {
+    init(
+        uid: String, device: AudioDevice, settings: InputSettings, bufferFrames: UInt32,
+        channels: [Int], destinations rings: [RingBuffer]
+    ) throws {
         self.uid = uid
         self.device = device
         let rate = try device.nominalSampleRate
+        // The monitor path waits for one whole input block, so the input runs as small as the
+        // output does.
+        try? device.setBufferFrameSize(bufferFrames)
         // The HAL may hand a larger block than the device reports, so the scratch carries headroom.
-        let blockFrames = 2 * max(Int((try? device.bufferFrameSize) ?? 512), 512)
+        let blockFrames = 2 * max(Int((try? device.bufferFrameSize) ?? bufferFrames), 512)
         let ratio = rate / micMixRate
         let resampler = Resampler(
             channels: 1, ratio: ratio, maxDownsampleFactor: max(1, (ratio * 1.01).rounded(.up)))
@@ -515,7 +530,7 @@ final class InputNode {
             guard let input else { return }
             let count = min(bufferListFrames(input), blockFrames)
             guard count > 0 else { return }
-            mixToMono(input, frames: count, into: mono)
+            mixToMono(input, channels: channels, frames: count, into: mono)
             state.pointee.gain.setTarget(linear: gainTarget.value)
             state.pointee.gain.apply(mono, frames: count, channels: 1)
             let produced = state.pointee.resampler

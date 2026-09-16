@@ -45,6 +45,7 @@ struct InputRow: View {
                         label: "Mute \(entry.name)",
                         symbol: settings.muted ? "mic.slash" : "mic",
                         isOn: binding(\.muted))
+                    if channelCount > 1 { channelPicker }
                 }
             }
         }
@@ -57,6 +58,41 @@ struct InputRow: View {
     private var fill: Color {
         if settings.enabled { return isHovered ? Theme.cardFillHover : Theme.cardFill }
         return isHovered ? Theme.rowFillHover : .clear
+    }
+
+    private var channelCount: Int { entry.device.inputChannelCount }
+    private var chosenChannels: [Int] { settings.channels(available: channelCount) }
+
+    /// Which of the device's channels go into the mix, one check per channel.
+    private var channelPicker: some View {
+        let names = entry.device.inputChannelNames
+        return Menu {
+            ForEach(0..<channelCount, id: \.self) { channel in
+                let name = channel < names.count ? names[channel] : ""
+                Toggle(name.isEmpty ? "Channel \(channel + 1)" : "\(channel + 1)  \(name)", isOn: channelBinding(channel))
+            }
+        } label: {
+            Text("Ch " + chosenChannels.map { String($0 + 1) }.joined(separator: "+"))
+                .font(.system(size: 11).monospacedDigit())
+        }
+        .controlSize(.small)
+        .fixedSize()
+        .help(
+            "Channels of \(entry.name) that go into the mix. Leave the loopback or mix channels of an audio interface off, or other people hear themselves.")
+        .accessibilityLabel("Channels of \(entry.name) in the mix")
+    }
+
+    /// The last chosen channel stays on, so the mix never goes silent by accident.
+    private func channelBinding(_ channel: Int) -> Binding<Bool> {
+        Binding(
+            get: { model.input(entry.id).channels(available: channelCount).contains(channel) },
+            set: { on in
+                model.updateInput(entry.id) { settings in
+                    var chosen = Set(settings.channels(available: channelCount))
+                    if on { chosen.insert(channel) } else if chosen.count > 1 { chosen.remove(channel) }
+                    settings.channels = chosen.sorted()
+                }
+            })
     }
 
     private func binding<T>(_ key: WritableKeyPath<InputSettings, T>) -> Binding<T> {

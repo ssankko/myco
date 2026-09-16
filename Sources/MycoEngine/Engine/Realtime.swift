@@ -30,23 +30,30 @@ private func frames(in buffer: AudioBuffer) -> Int {
     return Int(buffer.mDataByteSize) / (channels * MemoryLayout<Float>.size)
 }
 
-/// Averages every channel of an interleaved list into one mono block.
-func mixToMono(_ list: UnsafeMutableAudioBufferListPointer, frames count: Int, into destination: UnsafeMutablePointer<Float>) {
+/// Averages the chosen channels of a list into one mono block. Channels are counted across the
+/// list's buffers, so channel 2 of two stereo buffers is the first channel of the second.
+func mixToMono(
+    _ list: UnsafeMutableAudioBufferListPointer, channels: [Int], frames count: Int,
+    into destination: UnsafeMutablePointer<Float>
+) {
     destination.update(repeating: 0, count: count)
-    var channels = 0
+    var base = 0
+    var taken = 0
     for buffer in list {
         let width = Int(buffer.mNumberChannels)
-        guard width > 0, let samples = buffer.mData?.assumingMemoryBound(to: Float.self) else { continue }
-        let available = min(count, frames(in: buffer))
-        for channel in 0..<width {
-            vDSP_vadd(
-                destination, 1, samples + channel, vDSP_Stride(width), destination, 1,
-                vDSP_Length(available))
+        if width > 0, let samples = buffer.mData?.assumingMemoryBound(to: Float.self) {
+            let available = min(count, frames(in: buffer))
+            for channel in channels where channel >= base && channel < base + width {
+                vDSP_vadd(
+                    destination, 1, samples + (channel - base), vDSP_Stride(width), destination, 1,
+                    vDSP_Length(available))
+                taken += 1
+            }
         }
-        channels += width
+        base += width
     }
-    guard channels > 1 else { return }
-    var scale = 1 / Float(channels)
+    guard taken > 1 else { return }
+    var scale = 1 / Float(taken)
     vDSP_vsmul(destination, 1, &scale, destination, 1, vDSP_Length(count))
 }
 

@@ -44,6 +44,7 @@ Readouts are fixed width, fixed sign and fixed decimals, so a column of numbers 
 - Rows are 10 points apart, sections 14. A card has a radius of 8 and a padding of 8.
 - A glyph button is 19 points high with a radius of 5, bordered in `border`, filled with `signal` and white on top while it is on. Under the pointer it takes `rowFillHover` and `borderHover`, or `signalHover` while on.
 - The details of an output sit on one row: buffer picker, then sync trim and computed delay when outputs are aligned, then the latency and underrun readouts pushed right. They wrap under the controls only when they do not fit.
+- The details of an input sit on one row: gain, mute, and on a device with more than one channel a channel picker that reads `Ch 1+2`.
 
 ## Rules
 

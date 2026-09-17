@@ -22,7 +22,7 @@
 #pragma mark - Configuration
 
 //  The one place the driver version lives; the app reads it through the 'mxvr' custom property.
-#define kDriverVersion  CFSTR("0.4.0")
+#define kDriverVersion  CFSTR("0.5.0")
 
 #define kBoxUID         CFSTR("com.ssankko.myco.box")
 #define kManufacturer   CFSTR("Myco")
@@ -51,6 +51,11 @@ enum
 //  coming and going, and a timer posts a change when the count moves, because a client caches
 //  the value until it is told otherwise.
 #define kDeviceCustomProperty_ClientIO ((AudioObjectPropertySelector)'mxci')
+
+//  Custom property on `Myco`, a CFString with the frames the app takes to play the mix on its
+//  fastest physical output. The device reports it as kAudioDevicePropertyLatency, so a player
+//  that holds video back by the device latency lands in step with that output.
+#define kDeviceCustomProperty_Latency  ((AudioObjectPropertySelector)'mxlt')
 #define kIOClientTimeout        0.5
 #define kIOClientPollSeconds    0.25
 #define kMaxIOClients           32
@@ -106,6 +111,8 @@ typedef struct
     //  Slot per client seen on the IO thread; mClientID holds the ID plus one so zero means free.
     struct { _Atomic UInt32 mClientID; _Atomic UInt64 mLastCycle; } mIOClients[kMaxIOClients];
     UInt32                      mNotifiedClientIO;
+    //  Frames at mSampleRate, set by the app through kDeviceCustomProperty_Latency.
+    UInt32                      mLatency;
     Float32                     mVolumeScalar;
     UInt32                      mMute;
 
@@ -628,13 +635,17 @@ static OSStatus Device_GetProperty(const DeviceState* inDevice, const AudioObjec
         {
             AudioServerPlugInCustomPropertyInfo theInfo =
             {
-                kDeviceCustomProperty_ClientIO,
+                (inDevice->mInputStreamID != kAudioObjectUnknown) ? kDeviceCustomProperty_ClientIO
+                                                                  : kDeviceCustomProperty_Latency,
                 kAudioServerPlugInCustomPropertyDataTypeCFString,
                 kAudioServerPlugInCustomPropertyDataTypeNone
             };
-            return ReturnArray(&theInfo, sizeof(theInfo), (inDevice->mInputStreamID != kAudioObjectUnknown) ? 1 : 0,
-                               inDataSize, outDataSize, outData);
+            return ReturnArray(&theInfo, sizeof(theInfo), 1, inDataSize, outDataSize, outData);
         }
+
+        case kDeviceCustomProperty_Latency:
+            if(inDevice->mInputStreamID != kAudioObjectUnknown) return kAudioHardwareUnknownPropertyError;
+            RETURN_SCALAR(CFStringRef, CFStringCreateWithFormat(NULL, NULL, CFSTR("%u"), inDevice->mLatency));
 
         case kDeviceCustomProperty_ClientIO:
             if(inDevice->mInputStreamID == kAudioObjectUnknown) return kAudioHardwareUnknownPropertyError;
@@ -650,7 +661,7 @@ static OSStatus Device_GetProperty(const DeviceState* inDevice, const AudioObjec
             RETURN_SCALAR(UInt32, (gAppProcessCount > 0) ? 0 : 1);
 
         case kAudioDevicePropertyLatency:
-            RETURN_SCALAR(UInt32, 0);
+            RETURN_SCALAR(UInt32, inDevice->mLatency);
 
         //  The margin on the input side: the host places the input time that much further behind
         //  the output time, which keeps a loopback read behind the write that fills it.
@@ -1382,6 +1393,7 @@ static OSStatus Myco_IsPropertySettable(AudioServerPlugInDriverRef inDriver, Aud
         case kAudioDevicePropertyVolumeScalar:
         case kAudioDevicePropertyVolumeDecibels:
         case kAudioDevicePropertyMute:
+        case kDeviceCustomProperty_Latency:
             *outIsSettable = (theDevice != NULL) && (inObjectID == theDevice->mDeviceID);
             break;
 
@@ -1539,6 +1551,25 @@ static OSStatus Myco_SetPropertyData(AudioServerPlugInDriverRef inDriver, AudioO
                     if(theRate == theDevice->mRates[theIndex]) theError = 0;
                 }
                 if((theError == 0) && (theRate != theDevice->mSampleRate)) theRequestedRate = theRate;
+            }
+        }
+        else if(inAddress->mSelector == kDeviceCustomProperty_Latency)
+        {
+            if(inDataSize != sizeof(CFStringRef))
+            {
+                theError = kAudioHardwareBadPropertySizeError;
+            }
+            else
+            {
+                SInt32 theValue = CFStringGetIntValue(*((const CFStringRef*)inData));
+                UInt32 theNew = (theValue > 0) ? (UInt32)theValue : 0;
+                if(theNew != theDevice->mLatency)
+                {
+                    theDevice->mLatency = theNew;
+                    theChanged[0] = (AudioObjectPropertyAddress){ kAudioDevicePropertyLatency, kAudioObjectPropertyScopeOutput, kAudioObjectPropertyElementMain };
+                    theChanged[1] = (AudioObjectPropertyAddress){ kDeviceCustomProperty_Latency, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
+                    theChangedCount = 2;
+                }
             }
         }
         else if(theDevice->mVolumeID == kAudioObjectUnknown)

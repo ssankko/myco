@@ -109,6 +109,8 @@ package final class Engine {
     private var micReaders = 0
     /// The bands each output last took, so a move of another slider pushes no coefficients.
     private var pushedEQ: [String: [BandSettings]] = [:]
+    /// The latency the virtual device last took, in frames at the virtual rate.
+    private var pushedLatency: Int?
     private var feed: SharedFeed?
     private(set) var outputs: [OutputNode] = []
     private var inputs: [InputNode] = []
@@ -175,6 +177,7 @@ package final class Engine {
         volumeListeners = [:]
         await teardownInputs(fading: outputs)
         stopOutputs(outputs)
+        pushLatency(0)
         feed?.unmap()
         feed = nil
         plan = Plan()
@@ -501,10 +504,12 @@ package final class Engine {
         let aligned = sync
             ? alignmentDelays(outputs.map(\.latency))
             : Array(repeating: 0, count: outputs.count)
+        var delays: [Int] = []
         for (index, node) in outputs.enumerated() {
             let trim = sync ? output(node.uid).syncTrimMilliseconds : 0
             let frames = max(0, aligned[index] + Int((trim / 1000 * node.sampleRate).rounded()))
             node.delay.setDelay(frames: frames)
+            delays.append(frames)
             var status = outputStatus[node.uid] ?? OutputStatus()
             status.isActive = true
             status.sampleRate = node.sampleRate
@@ -512,6 +517,20 @@ package final class Engine {
             status.delayMilliseconds = node.sampleRate > 0 ? Double(frames) / node.sampleRate * 1000 : 0
             outputStatus[node.uid] = status
         }
+        pushLatency(reportedLatency(outputs.map(\.latency), delays: delays, rate: plan.virtualRate))
+    }
+
+    /// `'mxlt'`, the latency the driver reports for `Myco`, as a decimal string of frames.
+    private nonisolated static let latencySelector = AudioObjectPropertySelector(0x6D78_6C74)
+
+    /// Tells the driver how long the mix takes to reach the fastest output, so a player that syncs
+    /// video to the device latency stays in step. A driver without the property refuses the write.
+    private func pushLatency(_ frames: Int) {
+        guard frames != pushedLatency, let device = virtualDevice else { return }
+        let value = String(frames) as CFString
+        let address = AudioObjectPropertyAddress(Engine.latencySelector)
+        guard (try? device.id.setValue(address, value)) != nil else { return }
+        pushedLatency = frames
     }
 
     /// Copies what the IO threads counted into the status the UI reads.

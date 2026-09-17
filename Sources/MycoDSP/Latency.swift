@@ -45,3 +45,14 @@ public func alignmentDelays(_ outputs: [OutputLatency]) -> [Int] {
         return max(0, Int(((slowest - output.seconds) * output.sampleRate).rounded()))
     }
 }
+
+/// Frames at `rate` the virtual device reports as its own latency: the fastest output's latency
+/// plus the delay the engine gives it, so a player that holds video back by that much lands in
+/// step with the fastest output. Empty means nothing plays and the device reports zero.
+public func reportedLatency(_ outputs: [OutputLatency], delays: [Int], rate: Double) -> Int {
+    let seconds = zip(outputs, delays).map { output, delay in
+        output.seconds + (output.sampleRate > 0 ? Double(delay) / output.sampleRate : 0)
+    }
+    guard let fastest = seconds.min(), rate > 0 else { return 0 }
+    return Int((fastest * rate).rounded())
+}

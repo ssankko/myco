@@ -60,7 +60,7 @@ Hot swap: the engine listens for `kAudioHardwarePropertyDevices`. A device whose
 
 Pinning: while running and with the toggle on, the engine listens for default output and default input changes and sets them back to the virtual devices.
 
-Sync: a global toggle. Off means every output delay is 0. On means each output delay is the largest reported output latency (`kAudioDevicePropertyLatency` + `kAudioDevicePropertySafetyOffset` + stream latency + buffer size + the target fill it holds in the shared ring) among enabled outputs minus its own, plus a per-output manual trim in milliseconds.
+Sync: a global toggle. Off means every output delay is 0. On means each output delay is the largest reported output latency (`kAudioDevicePropertyLatency` + `kAudioDevicePropertySafetyOffset` + stream latency + buffer size + the target fill it holds in the shared ring) among enabled outputs minus its own, plus a per-output manual trim in milliseconds. Whatever sync does, the engine writes the fastest output's latency plus its delay, in frames at the virtual rate, to the driver's `'mxlt'` property, and `Myco` reports that number as `kAudioDevicePropertyLatency`, so a player that holds video back by the device latency, as every one does for a Bluetooth headset, stays in step with the fastest output.
 
 Lifecycle: on launch, remember the current default output and input, then pin to the virtual devices. On quit, restore them. On launch after a crash, the same logic applies because the driver already hid the devices when the app died.
 

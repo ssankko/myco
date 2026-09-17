@@ -22,5 +22,17 @@ final class DSPLatencyTests: XCTestCase {
 
     func testAnEmptyListIsEmpty() {
         XCTAssertEqual(alignmentDelays([]), [])
+        XCTAssertEqual(reportedLatency([], delays: [], rate: 48000), 0)
+    }
+
+    func testTheReportedLatencyIsTheFastestOutputWithItsDelay() {
+        let outputs = [
+            // 1000 frames at 48000 is 20.8333 ms.
+            OutputLatency(deviceLatency: 744, bufferSize: 256, sampleRate: 48000),
+            // 512 frames at 44100 is 11.61 ms, the fastest; 441 frames of delay make it 21.61 ms.
+            OutputLatency(deviceLatency: 256, bufferSize: 256, sampleRate: 44100),
+        ]
+        XCTAssertEqual(reportedLatency(outputs, delays: [0, 0], rate: 96000), 1115)
+        XCTAssertEqual(reportedLatency(outputs, delays: [0, 441], rate: 96000), 2000)
     }
 }

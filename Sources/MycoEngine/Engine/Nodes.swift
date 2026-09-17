@@ -74,7 +74,17 @@ struct MonitorTap: @unchecked Sendable {
         var primed: Bool
         var inputs: Int
         var primeLevel: Double
+        /// Fill held above `primeLevel`, earned one pull per short read and kept. The input and
+        /// the consumer run on two IO threads whose timing drifts apart by more than two pulls
+        /// now and then, and a short read is what that looks like.
+        var slack: Double
     }
+
+    /// Pulls of margin a short read can earn in total.
+    static let maxSlackPulls = 8
+    /// The margin every tap starts with. Two pulls of a 32-frame output are under a millisecond,
+    /// less than the two IO threads drift apart at times, so the ring holds this much at least.
+    static let minimumMarginSeconds = 0.003
 
     /// `maxInputs` rings, of which the first `configure`d count are live.
     let rings: UnsafeMutableBufferPointer<RingBuffer>
@@ -110,7 +120,8 @@ struct MonitorTap: @unchecked Sendable {
         state.initialize(
             to: State(
                 resampler: resampler, follower: ClockFollower(targetFillFrames: 0), primed: false,
-                inputs: 0, primeLevel: 0))
+                inputs: 0, primeLevel: 0,
+                slack: max(0, micMixRate * MonitorTap.minimumMarginSeconds - 2 * pull)))
         wantedInputs = AtomicCounter()
         wantedPrimeLevel = AtomicFloat(0)
     }
@@ -152,12 +163,12 @@ struct MonitorTap: @unchecked Sendable {
             state.pointee.inputs = inputs
             state.pointee.primeLevel = Double(wantedPrimeLevel.value)
             state.pointee.follower.aim(
-                target: state.pointee.primeLevel,
+                target: state.pointee.primeLevel + state.pointee.slack,
                 producerBlock: state.pointee.primeLevel - 2 * pull)
         }
         guard inputs > 0 else { return false }
         let live = rings.prefix(inputs)
-        let primeLevel = state.pointee.primeLevel
+        let primeLevel = state.pointee.primeLevel + state.pointee.slack
 
         var fill = Int.max
         for ring in live { fill = min(fill, ring.fillLevel) }
@@ -185,7 +196,14 @@ struct MonitorTap: @unchecked Sendable {
                 vDSP_vadd(summed, 1, part, 1, summed, 1, vDSP_Length(need))
             }
         }
-        if short && fill == 0 { state.pointee.primed = false }
+        if short {
+            let cap = Double(MonitorTap.maxSlackPulls) * pull
+            if state.pointee.slack < cap {
+                state.pointee.slack = min(cap, state.pointee.slack + pull)
+                state.pointee.follower.drift.targetFillFrames += pull
+            }
+            if fill == 0 { state.pointee.primed = false }
+        }
 
         let produced = state.pointee.resampler
             .process(input: summed, frames: need, output: destination, capacity: count).produced

@@ -23,6 +23,8 @@ let package = Package(
         .target(name: "MycoEngine", dependencies: ["MycoDSP", "MycoAtomics"]),
         .executableTarget(
             name: "Myco", dependencies: ["MycoEngine", "MycoDSP"], exclude: ["Myco.svg", "Resources"]),
+        // A reader of one device in a process of its own, for the engine tests.
+        .executableTarget(name: "MycoReader"),
         // Signal measurements both test targets assert on.
         .target(name: "MycoTestSupport", path: "Tests/MycoTestSupport"),
         .testTarget(name: "MycoDSPTests", dependencies: ["MycoDSP", "MycoTestSupport"]),

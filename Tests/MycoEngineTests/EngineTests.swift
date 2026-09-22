@@ -192,6 +192,11 @@ final class EngineTests: XCTestCase {
         await engine.start()
         addTeardownBlock { await engine.stop() }
 
+        // Readers are told apart by process, so the capture below alone opens no microphone.
+        let reader = try ExternalReader(uid: AppModel.micDeviceUID)
+        addTeardownBlock { reader.stop() }
+        try await Task.sleep(for: .milliseconds(500))
+
         let capture = try Capture(device: mic, seconds: 1.5)
         try capture.start()
         try await Task.sleep(for: .seconds(1.0))
@@ -203,27 +208,21 @@ final class EngineTests: XCTestCase {
     }
 
     /// The microphones open only while something listens. Idle, the source device runs in no
-    /// process, so macOS shows no microphone indicator; a reader on `Myco Mic` opens it. The
-    /// engine's own writer on `Myco Mic` uses no input stream, so it counts as no reader even from
-    /// a process that is not the app.
+    /// process, so macOS shows no microphone indicator; a reader on `Myco Mic` opens it. Readers
+    /// are told apart by process, so the reader here is a process of its own.
     func testInputsOpenOnlyWhileTheMicDeviceIsRead() async throws {
         _ = try device(AppModel.outputDeviceUID)
-        let mic = try device(AppModel.micDeviceUID)
+        _ = try device(AppModel.micDeviceUID)
         guard let source = try AudioDevice.all.first(where: { $0.transportType == .builtIn && $0.hasInput })
         else { throw XCTSkip("this machine has no built-in microphone") }
         let running = AudioObjectPropertyAddress(kAudioDevicePropertyDeviceIsRunningSomewhere)
         guard try source.id.value(running) as UInt32 == 0
         else { throw XCTSkip("another process holds the built-in microphone") }
 
-        // A reader from the test before holds its slot in the driver for up to half a second.
-        let readers = AudioObjectPropertyAddress(AudioObjectPropertySelector(0x6D78_6369))
-        for _ in 0..<30 where (try? mic.id.string(readers)) != "0" {
-            try await Task.sleep(for: .milliseconds(100))
-        }
-        XCTAssertEqual(try mic.id.string(readers), "0", "Myco Mic still has a reader from another test")
-
         var settings = settings(virtualRate: 48000)
         settings.inputs[try source.uid] = InputSettings(enabled: true)
+        // A monitor on an output that is away wants no microphone, and must not hide a reader.
+        settings.outputs["absent-output"] = OutputSettings(enabled: true, monitor: true)
         let model = AppModel(settings: settings)
         let engine = Engine(model: model, managesDefaults: false, defaultsStore: emptyStore())
         await engine.start()
@@ -232,11 +231,10 @@ final class EngineTests: XCTestCase {
         try await Task.sleep(for: .milliseconds(500))
         XCTAssertEqual(try source.id.value(running) as UInt32, 0, "the microphone opened with nothing listening")
 
-        let capture = try Capture(device: mic, seconds: 2)
-        try capture.start()
+        let reader = try ExternalReader(uid: AppModel.micDeviceUID)
         try await Task.sleep(for: .seconds(1.0))
         XCTAssertEqual(try source.id.value(running) as UInt32, 1, "a reader on Myco Mic left the microphone closed")
-        _ = capture.stop()
+        reader.stop()
         try await Task.sleep(for: .seconds(1.5))
         XCTAssertEqual(try source.id.value(running) as UInt32, 0, "the microphone stayed open after the reader left")
     }

@@ -77,8 +77,10 @@ package final class Engine {
         var inputs: [String: [Int]?]
         /// The physical microphones open only while something listens: another process reading
         /// `Myco Mic`, or a monitor on an output that is running. Idle, they stay closed and macOS shows no
-        /// microphone indicator for Myco.
-        var inputsWanted: Bool
+        /// microphone indicator for Myco. The two are kept apart, because a monitor on an output
+        /// that is away opens nothing, and a reader must still replan while it is set.
+        var micRead: Bool
+        var monitors: Set<String>
         var fallback: String?
 
         init(_ settings: Settings, micReaders: Int) {
@@ -86,7 +88,8 @@ package final class Engine {
             outputs = settings.outputs.filter(\.value.enabled).mapValues(\.bufferFrames)
             inputs = settings.inputs.filter(\.value.enabled).mapValues(\.channels)
             fallback = settings.fallbackOutput
-            inputsWanted = micReaders > 0 || settings.outputs.values.contains { $0.enabled && $0.monitor }
+            micRead = micReaders > 0
+            monitors = Set(settings.outputs.filter { $0.value.enabled && $0.value.monitor }.keys)
         }
     }
 
@@ -105,7 +108,7 @@ package final class Engine {
     private var plan = Plan()
     /// What the current plan was made from; nil until the first one.
     private var planInputs: PlanInputs?
-    /// Processes other than Myco running IO on `Myco Mic`, as the driver counts them.
+    /// Processes other than this one reading `Myco Mic`, as far as the HAL tells them apart.
     private var micReaders = 0
     /// The bands each output last took, so a move of another slider pushes no coefficients.
     private var pushedEQ: [String: [BandSettings]] = [:]
@@ -146,7 +149,7 @@ package final class Engine {
         await watchVirtualDevice()
         await watchMicReaders()
         await readMaster()
-        readMicReaders()
+        micReaders = countMicReaders() ?? 0
 
         let events = await model.devices.events()
         eventTask = Task { [weak self] in
@@ -159,6 +162,8 @@ package final class Engine {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .milliseconds(500))
                 await self?.pollCounters()
+                await self?.recountMicReaders()
+                await self?.publishDriver()
             }
         }
 
@@ -232,12 +237,33 @@ package final class Engine {
 
     // MARK: Reconciliation
 
+    /// Set while `reconcile` runs. An apply that lands meanwhile leaves the replan it wants in
+    /// `applyPending` and the running one goes round again, so two never touch the graph at once.
+    private var applying = false
+    private var applyPending: Bool?
+
     /// `replan` asks the HAL again for a device that arrived, went away or changed its rate; a
     /// settings change plans anew only when it moves something the plan is made of.
     private func apply(_ wanted: Settings, replan: Bool = false) async {
         guard running else { return }
         settings = wanted
-        let inputs = PlanInputs(wanted, micReaders: micReaders)
+        if applying {
+            applyPending = (applyPending ?? false) || replan
+            return
+        }
+        applying = true
+        var replan = replan
+        while running {
+            await reconcile(replan: replan)
+            guard let pending = applyPending else { break }
+            applyPending = nil
+            replan = pending
+        }
+        applying = false
+    }
+
+    private func reconcile(replan: Bool) async {
+        let inputs = PlanInputs(settings, micReaders: micReaders)
         if replan || inputs != planInputs {
             planInputs = inputs
             await applyVirtualRate()
@@ -442,7 +468,14 @@ package final class Engine {
             }
         }
         try? micDrain?.start()
-        for input in inputs { try? input.start() }
+        for input in inputs {
+            do {
+                try input.start()
+                log.info("input \(input.uid, privacy: .public) started")
+            } catch {
+                log.error("input \(input.uid, privacy: .public) start: \(String(describing: error), privacy: .public)")
+            }
+        }
     }
 
     /// Fades the inputs together with the outputs about to stop, then takes the inputs down and
@@ -558,9 +591,13 @@ package final class Engine {
         }
     }
 
+    /// Sets the status the popover shows when it moved. Polled as well, because right after
+    /// coreaudiod restarts the HAL may not list the plug-in yet, and nothing else asks again.
     private func publishDriver() async {
         let status = DriverInstaller.status()
-        await MainActor.run { model.driver = status }
+        await MainActor.run {
+            if model.driver != status { model.driver = status }
+        }
     }
 
     // MARK: Master
@@ -631,34 +668,38 @@ package final class Engine {
         try? virtual.setVolumeScalar(scalar, scope: .output)
     }
 
-    /// `'mxci'`, the driver's count of clients other than the app running IO on a device.
-    private nonisolated static let clientIOSelector = AudioObjectPropertySelector(0x6D78_6369)
+    private nonisolated static let runningSomewhere = AudioObjectPropertyAddress(
+        kAudioDevicePropertyDeviceIsRunningSomewhere)
 
-    /// Follows the reader count of `Myco Mic`, so the microphones open when an app starts to
-    /// listen and close when the last one stops. The HAL hands a client the value it last read
-    /// until the driver posts a change, so the count is read only on a change.
+    /// A change in whether `Myco Mic` runs in some process recounts at once, which is how the
+    /// first reader opens the microphones without waiting for the poll.
     private func watchMicReaders() async {
         guard let device = micDevice else { return }
         let listener = await MainActor.run {
-            try? AudioObjectPropertyListener(
-                device.id, AudioObjectPropertyAddress(Engine.clientIOSelector)
-            ) { [weak self] _ in
-                Task { await self?.micReadersChanged() }
+            try? AudioObjectPropertyListener(device.id, Engine.runningSomewhere) { [weak self] _ in
+                Task { await self?.recountMicReaders() }
             }
         }
         if let listener { listeners.append(listener) }
     }
 
-    private func micReadersChanged() async {
-        readMicReaders()
-        log.info("mic readers \(self.micReaders)")
-        await apply(settings)
+    /// What reads `Myco Mic`. The HAL does not say which device a process reads, so the readers
+    /// are the processes other than this one running input anywhere while `Myco Mic` runs in some
+    /// process; with the microphones closed, nothing but a reader runs it. Nil when the HAL failed
+    /// a read, which it does on a process object it has only just added.
+    private func countMicReaders() -> Int? {
+        guard let device = micDevice,
+            ((try? device.id.value(Engine.runningSomewhere)) ?? UInt32(0)) != 0
+        else { return 0 }
+        return AudioProcesses.othersRunningInput
     }
 
-    /// A driver without the property, one older than this app, keeps the microphones open.
-    private func readMicReaders() {
-        guard let device = micDevice else { return }
-        micReaders = Int((try? device.id.string(AudioObjectPropertyAddress(Engine.clientIOSelector))) ?? "") ?? 1
+    /// Opens the microphones when an app starts to listen and closes them when the last one stops.
+    private func recountMicReaders() async {
+        guard running, let count = countMicReaders(), count != micReaders else { return }
+        micReaders = count
+        log.info("mic readers \(count)")
+        await apply(settings)
     }
 
     private func readMaster() async {

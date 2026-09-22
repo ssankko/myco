@@ -4,6 +4,7 @@
 //  the terminal. Run these from Terminal.app; anywhere else they capture silence.
 
 import CoreAudio
+import Foundation
 import XCTest
 
 @testable import MycoEngine
@@ -141,4 +142,29 @@ final class PrivateAggregate {
     }
 
     func destroy() { AudioHardwareDestroyAggregateDevice(id) }
+}
+
+/// A reader of one device in a process of its own, which is what the engine counts as a reader.
+@MainActor
+final class ExternalReader {
+    private let process = Process()
+    private let input = Pipe()
+
+    init(uid: String) throws {
+        let output = Pipe()
+        process.executableURL = Bundle(for: ExternalReader.self).bundleURL
+            .deletingLastPathComponent().appendingPathComponent("MycoReader")
+        process.arguments = [uid]
+        process.standardInput = input
+        process.standardOutput = output
+        try process.run()
+        // The reader prints a line once its IO proc runs.
+        _ = output.fileHandleForReading.readData(ofLength: 8)
+        precondition(process.isRunning, "MycoReader could not read \(uid)")
+    }
+
+    func stop() {
+        try? input.fileHandleForWriting.close()
+        process.waitUntilExit()
+    }
 }

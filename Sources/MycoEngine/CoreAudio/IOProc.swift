@@ -21,8 +21,8 @@ final class IOProc {
 
     /// Creates the IO proc. `bufferFrameSize`, when given, is applied to the device first, which
     /// affects this process only; pass a value inside `device.bufferFrameSizeRange`. With
-    /// `usesInput` false the HAL does no input work for this proc, and a driver that counts the
-    /// readers of a device does not count it.
+    /// `usesInput` false the HAL does no input work for this proc, and the process is not running
+    /// input on its account.
     init(
         device: AudioDevice, bufferFrameSize: UInt32? = nil, usesInput: Bool = true,
         callback: @escaping Callback

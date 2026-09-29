@@ -178,27 +178,27 @@ struct Popover: View {
 
     private var footer: some View {
         VStack(alignment: .leading, spacing: 9) {
-            HStack {
-                Text("Runs at")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.tertiary)
-                Picker("Virtual rate", selection: $model.settings.virtualRate) {
-                    // Qualified because SwiftUI has a `Settings` scene of its own.
-                    ForEach(MycoEngine.Settings.availableRates, id: \.self) { rate in
-                        Text(rateLabel(rate)).tag(rate)
-                    }
-                }
-                .labelsHidden()
-                .controlSize(.small)
-                .frame(width: 104)
-                .help("A change restarts every output.")
-                .accessibilityLabel("Rate of the Myco output device")
-                Spacer()
+            HStack(spacing: 4) {
+                // Qualified because SwiftUI has a `Settings` scene of its own.
+                ratePicker(
+                    "speaker.wave.2", selection: $model.settings.virtualRate,
+                    rates: MycoEngine.Settings.availableRates,
+                    help: "Rate of the Myco device. A change restarts every output.",
+                    accessibility: "Rate of the Myco output device")
+                ratePicker(
+                    "mic", selection: $model.settings.micRate,
+                    rates: MycoEngine.Settings.availableMicRates,
+                    help: "Rate of Myco Mic. A game in CrossOver breaks up the mic below 88.2 kHz. "
+                        + "Set it before the game opens the mic.",
+                    accessibility: "Rate of the Myco Mic device")
+                    .padding(.leading, 2)
+                Spacer(minLength: 4)
                 Toggle("Align outputs", isOn: $model.settings.sync)
                     .toggleStyle(.switch)
                     .controlSize(.mini)
                     .tint(Theme.signal)
                     .font(.system(size: 11))
+                    .fixedSize()
                     .help("Delays every output to match the slowest one.")
             }
 
@@ -219,8 +219,25 @@ struct Popover: View {
         total == 0 ? "none" : "\(on) of \(total) on"
     }
 
-    private func rateLabel(_ rate: Double) -> String {
-        String(format: "%.1f kHz", rate / 1000)
+    private func ratePicker(
+        _ symbol: String, selection: Binding<Double>, rates: [Double], help: String, accessibility: String
+    ) -> some View {
+        HStack(spacing: 4) {
+            Image(systemName: symbol)
+                .font(.system(size: 11))
+                .foregroundStyle(.tertiary)
+                .accessibilityHidden(true)
+            Picker(accessibility, selection: selection) {
+                ForEach(rates, id: \.self) { rate in
+                    Text(String(format: "%.1f kHz", rate / 1000)).tag(rate)
+                }
+            }
+            .labelsHidden()
+            .controlSize(.small)
+            .fixedSize()
+            .accessibilityLabel(accessibility)
+        }
+        .help(help)
     }
 }
 

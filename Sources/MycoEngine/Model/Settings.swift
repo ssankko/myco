@@ -91,6 +91,8 @@ package struct Settings: Codable, Equatable, Sendable {
     package var activeProfileID: UUID
     /// Nominal rate of the virtual output device.
     package var virtualRate: Double = 88200
+    /// Nominal rate of `Myco Mic`. Wine drops mic frames below 88200, see `kRatesMic` in the driver.
+    package var micRate: Double = 96000
     package var sync = false
     package var pinDefaults = true
     package var launchAtLogin = false
@@ -104,6 +106,7 @@ package struct Settings: Codable, Equatable, Sendable {
     package var inputNames: [String: String] = [:]
 
     package static let availableRates: [Double] = [44100, 48000, 88200, 96000, 176400, 192000]
+    package static let availableMicRates: [Double] = [48000, 88200, 96000]
 
     private static let key = "settings"
 
@@ -112,7 +115,7 @@ package struct Settings: Codable, Equatable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case profiles, activeProfileID, virtualRate, sync, pinDefaults, launchAtLogin
+        case profiles, activeProfileID, virtualRate, micRate, sync, pinDefaults, launchAtLogin
         case fallbackOutput, showOnlyConnected, outputNames, inputNames
         /// Written by builds before profiles: the devices of the one profile there was.
         case outputs, inputs
@@ -134,6 +137,7 @@ package struct Settings: Codable, Equatable, Sendable {
         let active = try c.decodeIfPresent(UUID.self, forKey: .activeProfileID)
         activeProfileID = profiles.contains { $0.id == active } ? active! : profiles[0].id
         virtualRate = try c.decodeIfPresent(Double.self, forKey: .virtualRate) ?? 88200
+        micRate = try c.decodeIfPresent(Double.self, forKey: .micRate) ?? 96000
         sync = try c.decodeIfPresent(Bool.self, forKey: .sync) ?? false
         pinDefaults = try c.decodeIfPresent(Bool.self, forKey: .pinDefaults) ?? true
         launchAtLogin = try c.decodeIfPresent(Bool.self, forKey: .launchAtLogin) ?? false
@@ -148,6 +152,7 @@ package struct Settings: Codable, Equatable, Sendable {
         try c.encode(profiles, forKey: .profiles)
         try c.encode(activeProfileID, forKey: .activeProfileID)
         try c.encode(virtualRate, forKey: .virtualRate)
+        try c.encode(micRate, forKey: .micRate)
         try c.encode(sync, forKey: .sync)
         try c.encode(pinDefaults, forKey: .pinDefaults)
         try c.encode(launchAtLogin, forKey: .launchAtLogin)

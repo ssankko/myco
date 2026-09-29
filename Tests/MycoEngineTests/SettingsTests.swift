@@ -14,6 +14,7 @@ final class SettingsTests: XCTestCase {
         XCTAssertNil(settings.outputs["a"]?.presetName)
         XCTAssertEqual(settings.enabledInputs, ["m"])
         XCTAssertEqual(settings.virtualRate, 48000)
+        XCTAssertEqual(settings.micRate, 96000)
         XCTAssertTrue(settings.sync)
         XCTAssertFalse(settings.pinDefaults)
         XCTAssertNil(settings.fallbackOutput)

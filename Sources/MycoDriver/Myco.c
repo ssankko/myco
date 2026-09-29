@@ -22,7 +22,7 @@
 #pragma mark - Configuration
 
 //  The one place the driver version lives; the app reads it through the 'mxvr' custom property.
-#define kDriverVersion  CFSTR("0.6.0")
+#define kDriverVersion  CFSTR("0.7.0")
 
 #define kBoxUID         CFSTR("com.ssankko.myco.box")
 #define kManufacturer   CFSTR("Myco")
@@ -66,7 +66,9 @@ static const Float32    kVolumeMinDB = -96.0f;
 static const Float32    kVolumeMaxDB = 0.0f;
 
 static const Float64    kRatesOut[] = { 44100.0, 48000.0, 88200.0, 96000.0, 176400.0, 192000.0 };
-static const Float64    kRatesMic[] = { 48000.0 };
+//  Wine captures through a buffer of three 10 ms periods and drains it to two, so a 512 frame IO
+//  cycle loses frames at 48000 and fits from 88200 up.
+static const Float64    kRatesMic[] = { 48000.0, 88200.0, 96000.0 };
 
 #pragma mark - State
 
@@ -124,7 +126,7 @@ static DeviceState gDevices[2] =
         .mName = CFSTR("Myco"),
         .mChannels = kFeedChannels,
         .mRates = kRatesOut,
-        .mRateCount = 6,
+        .mRateCount = sizeof(kRatesOut) / sizeof(kRatesOut[0]),
         .mDefaultScope = kAudioObjectPropertyScopeOutput,
         .mRingFrames = kFeedRingFrames,
         .mSampleRate = 88200.0,
@@ -143,11 +145,11 @@ static DeviceState gDevices[2] =
         .mName = CFSTR("Myco Mic"),
         .mChannels = 1,
         .mRates = kRatesMic,
-        .mRateCount = 1,
+        .mRateCount = sizeof(kRatesMic) / sizeof(kRatesMic[0]),
         .mDefaultScope = kAudioObjectPropertyScopeInput,
         .mRingFrames = kRingFrames,
         .mRing = gRingMic,
-        .mSampleRate = 48000.0,
+        .mSampleRate = 96000.0,
         .mInputStreamActive = 1,
         .mOutputStreamActive = 1,
         .mVolumeScalar = 1.0f

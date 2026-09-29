@@ -3,7 +3,7 @@ import CoreAudio
 import Foundation
 import MycoDSP
 
-/// The rate the mic mix runs at, fixed by the `Myco Mic` device.
+/// The rate the mic mix runs at. The `Myco Mic` drain resamples it to the device's rate.
 let micMixRate: Double = 48000
 
 /// Weight of one block in the running average of a ring's fill, which spans about a second.
@@ -570,7 +570,7 @@ final class InputNode {
     }
 }
 
-/// Writes the mic mix into the `Myco Mic` device, which is where other apps read it.
+/// Writes the mic mix into the `Myco Mic` device at `rate`, which is where other apps read it.
 @EngineActor
 final class MicDrainNode {
     let tap: MonitorTap
@@ -579,10 +579,10 @@ final class MicDrainNode {
     private let blockFrames: Int
     private var proc: IOProc?
 
-    init(device: AudioDevice, inputs: Int, inputBlockFrames: Int) throws {
+    init(device: AudioDevice, rate: Double, inputs: Int, inputBlockFrames: Int) throws {
         let cycleFrames = Int((try? device.bufferFrameSize) ?? 512)
         blockFrames = 2 * max(cycleFrames, 512)
-        tap = MonitorTap(rate: micMixRate, frames: cycleFrames)
+        tap = MonitorTap(rate: rate, frames: cycleFrames)
         tap.configure(inputs: inputs, producerFrames: inputBlockFrames)
         mono = .allocate(capacity: blockFrames)
         mono.initialize(repeating: 0, count: blockFrames)

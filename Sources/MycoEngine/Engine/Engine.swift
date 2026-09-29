@@ -19,8 +19,8 @@ package actor EngineActor {
 ///
 /// Every enabled output has one IO proc, which reads the driver's shared ring directly and pulls it
 /// through a resampler, the mic monitor, the EQ, the delay and the gains. Enabled inputs are summed
-/// to the mic mix at 48 kHz, which the `Myco Mic` device publishes and every output's monitor
-/// tap reads.
+/// to the mic mix at 48 kHz, which every output's monitor tap reads and the `Myco Mic` device
+/// publishes at the mic rate.
 ///
 /// The engine takes a copy of `model.settings` whenever it changes and reconciles the graph against
 /// it. Only the outputs whose plan entry changed are stopped and built again, and a change to the
@@ -52,6 +52,8 @@ package final class Engine {
 
         /// The rate the shared ring runs at, which the engine sets from `settings.virtualRate`.
         var virtualRate: Double = 0
+        /// The rate `Myco Mic` runs at, which the engine sets from `settings.micRate`.
+        var micRate: Double = 0
         var outputs: [Output] = []
         var inputs: [Input] = []
 
@@ -71,6 +73,7 @@ package final class Engine {
     /// alone moves a parameter in the running graph and never queries the HAL.
     private struct PlanInputs: Equatable {
         var virtualRate: Double
+        var micRate: Double
         /// Every enabled output and the buffer size it asks for.
         var outputs: [String: UInt32?]
         /// Every enabled input and the channels it puts into the mix.
@@ -85,6 +88,7 @@ package final class Engine {
 
         init(_ settings: Settings, micReaders: Int) {
             virtualRate = settings.virtualRate
+            micRate = settings.micRate
             outputs = settings.outputs.filter(\.value.enabled).mapValues(\.bufferFrames)
             inputs = settings.inputs.filter(\.value.enabled).mapValues(\.channels)
             fallback = settings.fallbackOutput
@@ -266,7 +270,8 @@ package final class Engine {
         let inputs = PlanInputs(settings, micReaders: micReaders)
         if replan || inputs != planInputs {
             planInputs = inputs
-            await applyVirtualRate()
+            await setRate(of: virtualDevice, to: settings.virtualRate)
+            await setRate(of: micDevice, to: settings.micRate)
             let next = makePlan()
             let kept = next.keptOutputs(from: plan)
             let stopping = outputs.filter { !kept.contains($0.uid) }
@@ -284,7 +289,7 @@ package final class Engine {
                     await watchOutputVolumes()
                     buildInputs()
                 }
-            } else if next.inputs != plan.inputs {
+            } else if next.inputs != plan.inputs || next.micRate != plan.micRate {
                 await rebuilding {
                     await teardownInputs()
                     plan = next
@@ -309,16 +314,14 @@ package final class Engine {
     private var virtualDevice: AudioDevice? { (try? AudioDevice.find(uid: AppModel.outputDeviceUID)) ?? nil }
     private var micDevice: AudioDevice? { (try? AudioDevice.find(uid: AppModel.micDeviceUID)) ?? nil }
 
-    /// The virtual device is the one device the engine sets the rate on; a physical device keeps
-    /// whatever rate it is at.
-    private func applyVirtualRate() async {
-        guard let device = virtualDevice else { return }
-        let wanted = settings.virtualRate
-        guard (try? device.nominalSampleRate) != wanted else { return }
+    /// The two virtual devices are the only ones the engine sets the rate on; a physical device
+    /// keeps whatever rate it is at.
+    private func setRate(of device: AudioDevice?, to wanted: Double) async {
+        guard let device, (try? device.nominalSampleRate) != wanted else { return }
         do {
             try device.setNominalSampleRate(wanted)
         } catch {
-            log.error("virtual rate \(wanted): \(String(describing: error), privacy: .public)")
+            log.error("device \(device.id) rate \(wanted): \(String(describing: error), privacy: .public)")
             return
         }
         // The HAL performs the change on its own thread; the graph is built against the new rate.
@@ -331,7 +334,7 @@ package final class Engine {
         // The rate in the header is the rate the samples in the ring were written at, so a change
         // still in flight rebuilds the graph against what the driver really does.
         guard virtualDevice != nil, let feed = openFeed() else { return Plan() }
-        var wanted = Plan(virtualRate: feed.sampleRate)
+        var wanted = Plan(virtualRate: feed.sampleRate, micRate: (try? micDevice?.nominalSampleRate) ?? 0)
 
         var outputUIDs = settings.enabledOutputs
         // With every enabled output unplugged, the stream goes to the fallback instead of nowhere.
@@ -450,8 +453,8 @@ package final class Engine {
         for output in outputs { output.tap.configure(inputs: count, producerFrames: block) }
         guard count > 0 else { return }
 
-        if let mic = micDevice {
-            micDrain = try? MicDrainNode(device: mic, inputs: count, inputBlockFrames: block)
+        if let mic = micDevice, plan.micRate > 0 {
+            micDrain = try? MicDrainNode(device: mic, rate: plan.micRate, inputs: count, inputBlockFrames: block)
         }
         for (index, item) in plan.inputs.enumerated() {
             var rings: [RingBuffer] = []
